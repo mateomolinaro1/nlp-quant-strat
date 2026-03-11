@@ -24,8 +24,8 @@ sandbox.txt
 docs/*
 !docs/.gitkeep
 
-data/*
-!data/.gitkeep
+#data/*
+#!data/.gitkeep
 
 outputs/results/*
 !outputs/results/.gitkeep
