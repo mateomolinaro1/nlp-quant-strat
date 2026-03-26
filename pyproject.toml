@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
+    "better-aws>=0.7.0",
+    "dotenv>=0.9.9",
+    "matplotlib>=3.10.8",
     "pandas>=3.0.1",
+    "scikit-learn>=1.8.0",
+    "spacy>=3.8.11",
 ]
 
 [tool.setuptools]

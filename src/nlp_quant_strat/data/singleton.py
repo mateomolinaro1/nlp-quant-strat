@@ -1,49 +1,47 @@
 import threading
-from typing import Dict, Any
+from typing import Any, Dict, TypeVar, Callable, cast
+
+T = TypeVar("T")
 
 
 class SingletonMeta(type):
     """
-    Metaclass that creates a singleton instance of a class.
+    Thread-safe singleton metaclass.
 
-    This implementation is thread-safe and ensures that only one instance
-    of each class exists throughout the application lifecycle.
+    A single instance is maintained per subclass using this metaclass.
     """
 
     _instances: Dict[type, Any] = {}
-    _lock: threading.Lock = threading.Lock()
+    _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
         """
-        Control the creation of class instances.
+        Return the unique instance for `cls`.
 
-        Returns the existing instance if it exists, otherwise creates a new one.
-        This method is thread-safe using double-checked locking pattern.
+        Uses double-checked locking to avoid creating multiple instances
+        in concurrent contexts.
         """
-        # Double-checked locking pattern for thread safety
         if cls not in cls._instances:
             with cls._lock:
-                # Check again in case another thread created the instance
-                # while we were waiting for the lock
                 if cls not in cls._instances:
-                    instance = super().__call__(*args, **kwargs)
-                    cls._instances[cls] = instance
+                    cls._instances[cls] = super().__call__(*args, **kwargs)
 
         return cls._instances[cls]
 
-    def clear_instances(cls):
+    def clear_instances(cls) -> None:
         """
-        Clear all singleton instances. Useful for testing.
+        Clear all singleton instances.
+
+        Useful in tests.
         """
         with cls._lock:
             cls._instances.clear()
 
-    def clear_instance(cls, target_class: type):
+    def clear_instance(cls, target_class: type) -> None:
         """
-        Clear a specific singleton instance. Useful for testing.
+        Clear the singleton instance for a specific class.
 
-        Args:
-            target_class: The class whose instance should be cleared
+        Useful in tests.
         """
         with cls._lock:
             cls._instances.pop(target_class, None)
@@ -51,53 +49,38 @@ class SingletonMeta(type):
 
 class Singleton(metaclass=SingletonMeta):
     """
-    Base singleton class that other classes can inherit from.
+    Base class for singleton objects.
 
-    Example usage:
-        class MyClass(Singleton):
-            def __init__(self, value=None):
-                # Only initialize once
-                if not hasattr(self, 'initialized'):
-                    self.value = value
-                    self.initialized = True
-
-        # Both instances will be the same object
-        instance1 = MyClass("first")
-        instance2 = MyClass("second")
-        print(instance1 is instance2)  # True
-        print(instance1.value)  # "first"
+    Subclasses should guard their own initialization if they want `__init__`
+    logic to run only once.
     """
 
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize the singleton instance.
-
-        Note: This will only be called once per class, even if the constructor
-        is called multiple times. Subclasses should implement their own logic
-        to handle multiple initialization attempts if needed.
-        """
+    def __init__(self, *args, **kwargs) -> None:
         pass
 
 
-# Decorator version for those who prefer decorator syntax
-def singleton(cls):
+def singleton(cls: type[T]) -> Callable[..., T]:
     """
-    Decorator version of the singleton pattern.
+    Decorator-based singleton implementation.
 
     Usage:
         @singleton
         class MyClass:
-            def __init__(self, value):
-                self.value = value
+            ...
+
+        instance_1 = MyClass()
+        instance_2 = MyClass()
+        assert instance_1 is instance_2
     """
-    instances = {}
+    instance: T | None = None
     lock = threading.Lock()
 
-    def get_instance(*args, **kwargs):
-        if cls not in instances:
+    def get_instance(*args, **kwargs) -> T:
+        nonlocal instance
+        if instance is None:
             with lock:
-                if cls not in instances:
-                    instances[cls] = cls(*args, **kwargs)
-        return instances[cls]
+                if instance is None:
+                    instance = cls(*args, **kwargs)
+        return cast(T, instance)
 
     return get_instance

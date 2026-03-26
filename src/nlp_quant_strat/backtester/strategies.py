@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Union, Tuple
 import pandas as pd
 import numpy as np
-import dynamic_allocation_macro_fmp.backtesting.utilities as utilities
+import nlp_quant_strat.backtester.utilities as utilities
 
 class Strategy(ABC):
     """Abstract class to define the interface for the strategy"""

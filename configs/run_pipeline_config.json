@@ -1,0 +1,36 @@
+{
+  "AWS": {"S3": {
+    "BUCKET_NAME": "nlp-quant-strat",
+    "AWS_DEFAULT_REGION": "eu-north-1",
+    "OUTPUT_FORMAT": "json",
+    "FILENAMES_TO_LOAD": [
+      "data/market/risk_free_returns.parquet",
+      "data/market/riy_asset_returns.parquet",
+      "data/market/riy_index_constituents.parquet",
+      "data/market/russell_returns.parquet",
+      "data/transcripts/formatted_unprocessed_transcripts.parquet",
+      "data/others/words_dict.parquet"
+    ],
+    "DATES_FILENAME": "data/market/riy_asset_returns.parquet",
+    "BENCHMARK_RETURNS_FILENAME": "data/market/russell_returns.parquet",
+    "TRANSCRIPTS_FILENAME": "data/transcripts/formatted_unprocessed_transcripts.parquet"
+  }},
+
+  "DATA": {
+    "MARKET_DATA_FREQUENCY": "m"
+  },
+
+  "FEATURE_ENGINEERING": {
+    "LOAD_OR_COMPUTE": "load"
+  },
+
+  "BACKTEST": {
+    "PERCENTILES_WINSORIZATION": [2, 98],
+    "PERCENTILES_PORTFOLIOS": [10, 90],
+    "INDUSTRY_SEGMENTATION": "",
+    "REBAL_PERIODS": 66,
+    "PORTFOLIO_TYPE": "long_only",
+    "TRANSACTION_COSTS_BPS": 10,
+    "STRATEGY_NAME": "POS_COUNT"
+  }
+}
