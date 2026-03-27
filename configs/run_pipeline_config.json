@@ -17,7 +17,7 @@
   }},
 
   "DATA": {
-    "MARKET_DATA_FREQUENCY": "m"
+    "MARKET_DATA_FREQUENCY": "d"
   },
 
   "FEATURE_ENGINEERING": {

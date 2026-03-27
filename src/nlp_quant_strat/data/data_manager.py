@@ -43,6 +43,7 @@ class DataManager:
         self._set_dates()
         self._set_asset_ids()
         self._build_mapping()
+        self._format_benchmark_data()
 
     # ---------- Internal helpers ---------- #
     def _init_s3(self) -> None:
@@ -61,6 +62,10 @@ class DataManager:
         )
 
     def get_asset_returns(self) -> pd.DataFrame:
+        """
+        helper to get the asset returns dataframe from the corresponding attribute, which is named after the filename
+        specified in the config. This is to avoid hardcoding attribute names and to ensure consistency with the config.
+        """
         filename = self.config.dates_filename
         attr_name = Path(filename).stem
 
@@ -71,6 +76,11 @@ class DataManager:
         return asset_returns_obj
 
     def get_benchmark_returns(self) -> pd.DataFrame:
+        """
+        helper to get the benchmark returns dataframe from the corresponding attribute, which is named after the
+        filename specified in the config. This is to avoid hardcoding attribute names and to ensure consistency with
+        the config.
+        """
         filename = self.config.benchmark_returns_filename
         attr_name = Path(filename).stem
 
@@ -79,6 +89,28 @@ class DataManager:
 
         asset_returns_obj = getattr(self, attr_name)
         return asset_returns_obj
+
+    def _format_benchmark_data(self) -> None:
+        """
+        Format (compute returns and align dates) the benchmark data to have the same structure as the asset returns
+        data.
+        """
+        benchmark_returns = self.get_benchmark_returns()
+        benchmark_returns.ffill(inplace=True, limit=1)
+        benchmark_returns = benchmark_returns.pct_change(fill_method=None)
+        asset_returns = self.get_asset_returns()
+        bench_cols = benchmark_returns.columns
+        # Align
+        df_merged = pd.merge(
+            left=asset_returns,
+            right=benchmark_returns,
+            left_index=True,
+            right_index=True,
+            how="left"
+        )
+        final_df = df_merged[bench_cols]
+        setattr(self, Path(self.config.benchmark_returns_filename).stem, final_df)
+        return
 
     def _get_formatted_unprocessed_transcripts(self) -> pd.DataFrame:
         filename = self.config.formatted_unprocessed_transcripts_filename

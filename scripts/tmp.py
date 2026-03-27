@@ -5,6 +5,7 @@ from nlp_quant_strat.backtester.strategies import CrossSectionalPercentiles
 from nlp_quant_strat.backtester.portfolio import EqualWeightingScheme
 from nlp_quant_strat.backtester.backtest import Backtest
 from nlp_quant_strat.backtester.analysis import PerformanceAnalyser
+from nlp_quant_strat.backtester.visualization import Visualizer
 from dotenv import load_dotenv
 import logging
 import sys
@@ -63,15 +64,14 @@ perf_analyzer = PerformanceAnalyser(
     zscores=None,
     bench_returns=data_manager.get_benchmark_returns(),
     forward_returns=None,
-    percentiles=f"{config.percentiles_portfolios[0]}-{config.percentiles_portfolios[1]}",
-    industries="" if config.industry_segmentation == "" else "with_industries_segmentation",
-    rebal_freq=f"{config.rebal_periods}D"
+    percentiles=f"({config.percentiles_portfolios[0]}-{config.percentiles_portfolios[1]})",
+    industries="without ind. seg." if config.industry_segmentation == "" else "with industries segmentation",
+    rebal_freq=f"{config.rebal_periods} days"
 )
 perf_analyzer.compute_metrics()
-# bench needs to compute returns and aligns on strategy returns index
-import matplotlib.pyplot as plt
-# save a plot of the cumulative returns of the strategy
-plt.figure(figsize=(10, 6))
-plt.plot(perf_analyzer.cumulative_performance, label=config.strategy_name)
-plt.savefig(config.ROOT_DIR / "outputs" / "figures" / f"{config.strategy_name}_cumulative_returns.png")
-plt.close()
+
+vizu = Visualizer(performance=perf_analyzer)
+vizu.plot_cumulative_performance(
+    saving_path=config.ROOT_DIR / "outputs" / "figures" / f"{config.strategy_name}_cumulative_returns.png"
+)
+

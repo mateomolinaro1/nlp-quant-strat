@@ -16,7 +16,9 @@ class PerformanceAnalyser:
         self.portfolio_returns = portfolio_returns
         self.bench_returns = bench_returns
         self.bench_cumulative_perf = None
+        self.bench_cumulative_perf_base_100 = None
         self.cumulative_performance = None
+        self.cumulative_performance_base_100 = None
         self.equity_curve = None
         self.metrics = None
         if freq not in ['d', 'w', 'm', 'y']:
@@ -40,12 +42,36 @@ class PerformanceAnalyser:
         self.industries = industries
         self.rebal_freq = rebal_freq
 
+        self._align_strategy_and_bench_returns()
+
+    def _align_strategy_and_bench_returns(self) -> None:
+        """
+        Align the strategy returns and the bench returns on the same time period
+        """
+        if self.portfolio_returns is not None and self.bench_returns is not None:
+            strat_cols = self.portfolio_returns.columns
+            bench_cols = self.bench_returns.columns
+            merged_df = pd.merge(
+                left=self.portfolio_returns,
+                right=self.bench_returns,
+                left_index=True,
+                right_index=True,
+                how='left'
+            )
+            if merged_df.iloc[0,:].isna().any():
+                merged_df = merged_df.iloc[1:, :]
+            self.portfolio_returns = merged_df[strat_cols]
+            self.bench_returns = merged_df[bench_cols]
+            return
+
     def compute_cumulative_performance(self, compound_type: str = "geometric"):
         """Compute the cumulative performance of the strategy"""
 
         if self.portfolio_returns is not None:
             if compound_type == "geometric":
-                self.cumulative_performance = (1 + self.portfolio_returns).cumprod() - 1
+                cum = (1 + self.portfolio_returns).cumprod()
+                self.cumulative_performance = cum - 1
+                self.cumulative_performance_base_100 = 100 * cum / cum.iloc[0,:]
             elif compound_type == "arithmetic":
                 self.cumulative_performance = self.portfolio_returns.cumsum()
             else:
@@ -53,7 +79,9 @@ class PerformanceAnalyser:
 
         if self.bench_returns is not None:
             if compound_type == "geometric":
-                self.bench_cumulative_perf = (1 + self.bench_returns).cumprod() - 1
+                cum = (1 + self.bench_returns).cumprod()
+                self.bench_cumulative_perf = cum - 1
+                self.bench_cumulative_perf_base_100 = 100 * cum / cum.iloc[0, :]
             elif compound_type == "arithmetic":
                 self.bench_cumulative_perf = self.bench_returns.cumsum()
 
@@ -240,41 +268,4 @@ class PerformanceAnalyser:
             "max_drawdown_bench": max_drawdown_bench.values[0],
         }
 
-    def plot_cumulative_performance(self,
-                                    saving_path:str=None,
-                                    show:bool=False,
-                                    blocking:bool=True):
-        """Plot the cumulative performance of the strategy"""
-        if self.cumulative_performance is None:
-            self.compute_cumulative_performance()
-        if self.metrics is None:
-            self.metrics = self.compute_metrics()
 
-        plt.figure(figsize=(12, 6))
-        if self.bench_returns is None:
-            plt.plot(self.cumulative_performance.index, self.cumulative_performance, label=f"{self.portfolio_returns.columns[0]}_returns")
-            plt.title(f"Cumulative Performance of strategy:{self.portfolio_returns.columns[0]} - {self.percentiles} - {self.industries} - {self.rebal_freq} \n"
-                      f"Performance Metrics: ann. ret={self.metrics['annualized_return']:.2%}; ann. vol={self.metrics['annualized_volatility']:.2%}; ann. SR={self.metrics['annualized_sharpe_ratio']:.2f}; max. dd={self.metrics['max_drawdown']:.2%}",
-                      fontsize=10)
-        else:
-            plt.plot(self.cumulative_performance.index, self.cumulative_performance,
-                     label=f"{self.portfolio_returns.columns[0]}")
-            plt.plot(self.bench_cumulative_perf.index, self.bench_cumulative_perf,
-                     label=f"{self.bench_returns.columns[0]}")
-            plt.title(
-                f"Cumulative Performance of strategy:{self.portfolio_returns.columns[0]} - {self.percentiles} - {self.industries} - {self.rebal_freq} \n"
-                f"Performance Metrics: ann. ret={self.metrics['annualized_return']:.2%}; ann. vol={self.metrics['annualized_volatility']:.2%}; ann. SR={self.metrics['annualized_sharpe_ratio']:.2f}; max. dd={self.metrics['max_drawdown']:.2%} \n"
-                f"Cumulative Performance of bench:{self.bench_returns.columns[0]} \n"
-                f"Performance Metrics Bench: ann. ret={self.metrics['annualized_return_bench']:.2%}; ann. vol={self.metrics['annualized_volatility_bench']:.2%}; ann. SR={self.metrics['annualized_sharpe_ratio_bench']:.2f}; max. dd={self.metrics['max_drawdown_bench']:.2%}",
-                fontsize=10)
-        plt.xlabel("Date")
-        plt.ylabel("Cumulative Performance")
-        plt.legend()
-        plt.grid()
-
-        if saving_path is not None:
-            plt.savefig(saving_path, bbox_inches='tight')
-        if show:
-            plt.show(block=blocking)
-
-        plt.close()
