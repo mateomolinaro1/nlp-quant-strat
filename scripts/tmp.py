@@ -87,3 +87,5 @@ for metric in ["sharpe", "annualized_return", "vol"]:
         metric=metric,
         saving_path=config.ROOT_DIR / "outputs" / "figures" / f"{config.strategy_name}_yearly_{metric}.png"
     )
+
+# End
