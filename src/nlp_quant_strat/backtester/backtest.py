@@ -1,5 +1,8 @@
 import pandas as pd
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Backtest:
     """Class to backtest a strategy"""
@@ -40,6 +43,7 @@ class Backtest:
         # Crop
         self.cropped_portfolio_gross_returns = self.portfolio_gross_returns.loc[self.start_date:,:]
         self.cropped_portfolio_net_returns = self.portfolio_net_returns.loc[self.start_date:, :]
+        logger.info("Backtest done.")
         return
 
     def get_results(self)->None:

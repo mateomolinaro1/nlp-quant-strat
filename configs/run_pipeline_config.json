@@ -32,5 +32,9 @@
     "PORTFOLIO_TYPE": "long_only",
     "TRANSACTION_COSTS_BPS": 10,
     "STRATEGY_NAME": "POS_COUNT"
+  },
+
+  "OUTPUTS": {
+    "ROLLING_WINDOW_PERFORMANCE": 252
   }
 }
