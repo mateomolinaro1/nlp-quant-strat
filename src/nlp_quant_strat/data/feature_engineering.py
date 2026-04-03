@@ -6,181 +6,173 @@ import pandas as pd
 import logging
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
-from nlp_quant_strat.utils.utils import S3Utils
 
 logger = logging.getLogger(__name__)
 
-
 class FeatureEngineering:
 
-    def __init__(self, data: DataManager, config:Config):
+    def __init__(self, data: DataManager, config: Config):
         self.data = data
         self.config = config
-        self.positive_count: pd.DataFrame | None = None
-        self.negative_count: pd.DataFrame | None = None
+        
+        # Mapping des features pour faciliter le chargement/sauvegarde
+        self.feature_names = [
+            "positive_count", "negative_count", "word_count", 
+            "polarity", "sentiment_density", "pos_polarity_count_q", "polarity_delta"
+        ]
+        
+        # Initialisation des attributs à None
+        for feat in self.feature_names:
+            setattr(self, feat, None)
+
+        self.q = getattr(self.config, 'sentiment_rolling_window', 4)
 
     # ***----------------------***
     # ***-- Helper functions --***
     # ***----------------------***
+    
     def _build_yearly_dicts(self):
-        """
-        Build yearly dictionaries of positive and negative words based on the "Positive" and "Negative" columns
-        in the words dictionary, and the filing dates in the mapping dataframe. As some words are removed or added over
-        time, we need to build a separate dictionary for each year to accurately count the sentiment words in the
-        transcripts. See more details at https://sraf.nd.edu/loughranmcdonald-master-dictionary/
-        :return:
-        """
+        """Build yearly sentiment dictionaries (Loughran-McDonald logic)"""
         logger.info("Building yearly sentiment dictionaries...")
-
         years = self.data.mapping_df['filing_date'].dt.year.unique()
         words_df = self.data.words_dict
         words_df["Word"] = words_df["Word"].str.lower()
 
-        yearly_pos = {}
-        yearly_neg = {}
-
-        # Convert once to numpy for speed
+        yearly_pos, yearly_neg = {}, {}
         words = words_df['Word'].values
         pos_flags = words_df['Positive'].values
         neg_flags = words_df['Negative'].values
 
         for year in years:
-            pos_set = set()
-            neg_set = set()
-
+            pos_set, neg_set = set(), set()
             for word, p, n in zip(words, pos_flags, neg_flags):
-
-                # Positive logic
                 if isinstance(p, (int, float, np.integer, np.floating)):
-                    if 0 < p <= year:
-                        pos_set.add(word)
-                    elif p < 0 and -p <= year:
-                        pos_set.discard(word)
-
-                # Negative logic
+                    if 0 < p <= year: pos_set.add(word)
+                    elif p < 0 and -p <= year: pos_set.discard(word)
                 if isinstance(n, (int, float, np.integer, np.floating)):
-                    if 0 < n <= year:
-                        neg_set.add(word)
-                    elif n < 0 and -n <= year:
-                        neg_set.discard(word)
-
+                    if 0 < n <= year: neg_set.add(word)
+                    elif n < 0 and -n <= year: neg_set.discard(word)
             yearly_pos[year] = pos_set
             yearly_neg[year] = neg_set
-
-            logger.info(f"Year {year}: {len(pos_set)} pos words, {len(neg_set)} neg words")
-
         return yearly_pos, yearly_neg
 
     def _format_df(self, df: pd.DataFrame, values_col: str, limit_ffill: int = 23 * 4) -> pd.DataFrame:
-        """
-        Format a wide-type dataframe to a long-type dataframe that aligned the columns and index to the asset returns
-        dataframe, and forward-fill missing values.
-        :param df: the dataframe to format, with columns "filing_date" (point-in-time date of the feature),
-            "asset" (asset ids), and the feature column specified in values_col
-        :param values_col: the name of the column containing the feature values to format
-        :param limit_ffill: the maximum number of periods to forward-fill, default is 23*4
-        :return: the formatted dataframe with the same columns and index as the asset returns dataframe, and
-            the feature values forward-filled
-        """
-        # Align feature column names to asset returns column names
+        """Format wide-type dataframe and align to asset returns"""
+        # Pivot pour passer en format (Date x Assets)
         df_formatted = df.pivot_table(columns="asset", index="filing_date", values=values_col)
         asset_returns = self.data.get_asset_returns()
+        
+        # Réalignement sur l'univers d'actifs
         df_formatted = df_formatted.reindex(columns=asset_returns.columns)
 
-        # Align feature index to asset returns index
+        # Merge_asof pour aligner les dates de publication sur les dates de marché
         df_formatted_aligned = pd.merge_asof(
-            asset_returns.reset_index(),
-            df_formatted.reset_index(),
+            asset_returns.reset_index()[['index']], 
+            df_formatted.sort_index().reset_index(),
             left_on="index",
             right_on="filing_date",
             direction="backward"
         ).set_index("index")
-        cols = [c for c in df_formatted_aligned.columns if c.endswith('_y')]
-        df_formatted_aligned = df_formatted_aligned[cols]
-        cols_cleaned = [c.replace('_y', '') for c in df_formatted_aligned]  # remove suffix for clarity
-        df_formatted_aligned.columns = cols_cleaned
+        
+        # Nettoyage des colonnes après merge
+        if "filing_date" in df_formatted_aligned.columns:
+            df_formatted_aligned = df_formatted_aligned.drop(columns=["filing_date"])
+            
+        # Propagation de la dernière valeur connue (Forward Fill)
         df_formatted_aligned.ffill(inplace=True, limit=limit_ffill)
-
         return df_formatted_aligned
 
     # ***----------------------***
-    # ***----- Feature 1 ------***
+    # ***-- Feature Compute ---***
     # ***----------------------***
-    def _compute_sentiment_count_feature(self) -> None:
-        """
-        Compute and stores the positive and negative word counts for each date-ticker-transcript using the yearly
-        dictionaries of positive / negative words, and align the resulted features to the asset returns dataframe.
-        """
 
-        df = self.data.mapping_df
+    def _compute_sentiment_features(self) -> None:
+        """Compute all NLP features in a single pass"""
+        df = self.data.mapping_df.copy()
         n = len(df)
+        logger.info(f"Starting NLP computation for {n} documents...")
 
-        logger.info(f"Starting sentiment computation for {n} documents...")
-
-        # Precompute dictionaries
         yearly_pos, yearly_neg = self._build_yearly_dicts()
-
-        # Prepare output arrays
+        
         pos_counts = np.zeros(n, dtype=np.int32)
         neg_counts = np.zeros(n, dtype=np.int32)
+        total_word_counts = np.zeros(n, dtype=np.int32)
 
-        # Precompute tokenized text ONCE (huge speed gain)
-        logger.info("Tokenizing all transcripts...")
+        logger.info("Tokenizing transcripts...")
         tokenized = df['transcript'].fillna("").str.lower().str.findall(r'\b\w+\b')
 
-        # Process by year (critical optimization)
         grouped = df.groupby(df['filing_date'].dt.year).groups
-
         for year, indices in grouped.items():
-
-            logger.info(f"Processing year {year} ({len(indices)} documents)")
-
-            pos_set = yearly_pos[year]
-            neg_set = yearly_neg[year]
-
+            logger.info(f"Processing year {year}...")
+            pos_set, neg_set = yearly_pos[year], yearly_neg[year]
+            
             for i in indices:
                 words = tokenized.iloc[i]
+                total_word_counts[i] = len(words)
+                if total_word_counts[i] > 0:
+                    pos_counts[i] = sum(1 for w in words if w in pos_set)
+                    neg_counts[i] = sum(1 for w in words if w in neg_set)
 
-                # Fast counting
-                pos_counts[i] = sum(w in pos_set for w in words)
-                neg_counts[i] = sum(w in neg_set for w in words)
-
-        # Assign results
+        # Calcul des colonnes brutes
         df["pos_count"] = pos_counts
         df["neg_count"] = neg_counts
-        cols = df.columns.tolist()
-        cols.remove("transcript")
-        cols.remove("return")
-        df = df[cols]
+        df["word_count"] = total_word_counts
+        df["polarity"] = (df["pos_count"] - df["neg_count"]) / (df["pos_count"] + df["neg_count"] + 1)
+        df["sentiment_density"] = df["pos_count"] / (df["word_count"] + 1)
+        df["is_pos_polarity"] = (df["polarity"] > 0).astype(int)
 
-        df_pos_aligned = self._format_df(df=df, values_col="pos_count")
-        df_neg_aligned = self._format_df(df=df, values_col="neg_count")
-        self.positive_count = df_pos_aligned
-        self.negative_count = df_neg_aligned
+        # Calculs temporels par Asset
+        df = df.sort_values(['asset', 'filing_date'])
+        
+        # Momentum : Count de polarité positive sur Q trimestres
+        df[f"pos_polarity_count_{self.q}q"] = (
+            df.groupby("asset")["is_pos_polarity"]
+            .rolling(window=self.q, min_periods=1)
+            .sum()
+            .reset_index(level=0, drop=True)
+        )
+        
+        # Delta : Changement de ton vs rapport précédent
+        df["polarity_delta"] = df.groupby("asset")["polarity"].diff()
 
-        logger.info("Sentiment computation completed.")
-        return
+        # Alignement et stockage
+        logger.info("Aligning features to market grid...")
+        self.positive_count = self._format_df(df, "pos_count")
+        self.negative_count = self._format_df(df, "neg_count")
+        self.word_count = self._format_df(df, "word_count")
+        self.polarity = self._format_df(df, "polarity")
+        self.sentiment_density = self._format_df(df, "sentiment_density")
+        self.pos_polarity_count_q = self._format_df(df, f"pos_polarity_count_{self.q}q")
+        self.polarity_delta = self._format_df(df, "polarity_delta")
 
+        # Sauvegarde automatique après calcul
+        self._save_features_to_s3()
+        logger.info("Feature engineering completed and saved.")
 
-    # ***----------------------***
-    # ***----- Feature 2 ------***
-    # ***----------------------***
+    def _save_features_to_s3(self):
+        """Helper to persist features"""
+        for feat in self.feature_names:
+            df = getattr(self, feat)
+            if df is not None:
+                key = f"data/features/{feat}.parquet"
+                self.data.aws.s3.save(df, key=key)
 
     # =========================
     # Public API
     # =========================
     def build_features(self):
+        """Main entry point: loads from S3 or triggers computation"""
         logger.info("Building features...")
-
-        if self.config.load_or_compute_features=="load":
-            logger.info("Loading features from s3")
-            self.positive_count = self.data.aws.s3.load(key="data/features/positive_count.parquet")
-            self.negative_count = self.data.aws.s3.load(key="data/features/negative_count.parquet")
-
-        elif self.config.load_or_compute_features=="compute":
-            self._compute_sentiment_count_feature()
-
+        
+        if self.config.load_or_compute_features == "load":
+            try:
+                logger.info("Attempting to load all features from S3...")
+                for feat in self.feature_names:
+                    val = self.data.aws.s3.load(key=f"data/features/{feat}.parquet")
+                    setattr(self, feat, val)
+                logger.info("All features loaded successfully.")
+            except Exception as e:
+                logger.warning(f"Error loading features: {e}. Falling back to computation.")
+                self._compute_sentiment_features()
         else:
-            logger.warning(f"Unknown option for load_or_compute_features: {self.config.load_or_compute_features}."
-                           f"No features will be built.")
-            raise ValueError(f"Unknown option for load_or_compute_features: {self.config.load_or_compute_features}")
+            self._compute_sentiment_features()
