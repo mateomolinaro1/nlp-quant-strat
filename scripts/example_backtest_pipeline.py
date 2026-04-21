@@ -49,9 +49,10 @@ ptf = EqualWeightingScheme(
 ptf.compute_weights()
 ptf.rebalance_portfolio()
 
+# !!! au shift des weights pour ne pas faire de lookahead bias
 backtester = Backtest(
     returns=data_manager.get_asset_returns(),
-    weights=ptf.rebalanced_weights,
+    weights=ptf.rebalanced_weights.shift(1),
     turnover=ptf.turnover,
     transaction_costs=config.transaction_costs,
     strategy_name=config.strategy_name
@@ -74,3 +75,17 @@ vizu = Visualizer(performance=perf_analyzer)
 vizu.plot_cumulative_performance(
     saving_path=config.ROOT_DIR / "outputs" / "figures" / f"{config.strategy_name}_cumulative_returns.png"
 )
+for metric in ["sharpe", "return", "vol"]:
+    vizu.plot_rolling_metric(
+        metric=metric,
+        saving_path=config.ROOT_DIR / "outputs" / "figures" /
+                    f"{config.strategy_name}_rolling_{metric}.png",
+        window=config.rolling_window_performance
+    )
+for metric in ["sharpe", "annualized_return", "vol"]:
+    vizu.plot_yearly_metrics(
+        metric=metric,
+        saving_path=config.ROOT_DIR / "outputs" / "figures" / f"{config.strategy_name}_yearly_{metric}.png"
+    )
+
+# End
