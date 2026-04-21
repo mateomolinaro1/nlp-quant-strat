@@ -21,7 +21,9 @@
     "MARKET_DATA_FREQUENCY": "d"
   },
   "FEATURE_ENGINEERING": {
-    "LOAD_OR_COMPUTE": "load"
+    "LOAD_OR_COMPUTE": "load",
+    "ROLLING_WINDOW_QUARTERS": 4,
+    "LIMIT_FFILL_QDATA": 92
   },
   "BACKTEST": {
     "SIGNAL_FEATURE": "composite",

@@ -16,18 +16,18 @@ class FeatureEngineering:
         self.data = data
         self.config = config
         
-        # Mapping des features pour faciliter le chargement/sauvegarde
+        # Features mapping to ease loading/saving
         self.feature_names = [
             "positive_count", "negative_count", "word_count", 
             "polarity", "sentiment_density", "pos_polarity_count_q", "polarity_delta"
         ]
         
-        # Initialisation des attributs à None
+        # Initialisation des attributes à None
         for feat in self.feature_names:
             setattr(self, feat, None)
 
-        # Fenêtre glissante pour le momentum (ex: 4 trimestres)
-        self.q = getattr(self.config, 'sentiment_rolling_window', 4)
+        # rolling window size for momentum feature (number of past quarters to look at)
+        self.q = getattr(self.config, 'rolling_window_quarters', 4)
 
     # ***----------------------***
     # ***-- Helper functions --***
@@ -36,12 +36,12 @@ class FeatureEngineering:
     def _build_yearly_dicts(self):
         """Build yearly sentiment dictionaries (Loughran-McDonald logic)"""
         logger.info("Building yearly sentiment dictionaries...")
-        # Sécurité si mapping_df est vide
+        # Security if mapping is None
         if self.data.mapping_df is None or self.data.mapping_df.empty:
-            raise ValueError("mapping_df est vide. Impossible de construire les dictionnaires annuels.")
+            raise ValueError("mapping_df is None. Impossible to build yearly dict.")
 
         years = self.data.mapping_df['filing_date'].dt.year.unique()
-        words_df = self.data.words_dict
+        words_df = self.data.get_words_dict()
         words_df["Word"] = words_df["Word"].str.lower()
 
         yearly_pos, yearly_neg = {}, {}
@@ -68,7 +68,7 @@ class FeatureEngineering:
         df_formatted = df.pivot_table(columns="asset", index="filing_date", values=values_col)
         asset_returns = self.data.get_asset_returns()
         
-        # Réalignement sur l'univers d'actifs
+        # Realignment on asset universe
         df_formatted = df_formatted.reindex(columns=asset_returns.columns)
 
         # Merge_asof pour aligner les dates de publication sur les dates de marché
@@ -80,12 +80,16 @@ class FeatureEngineering:
             direction="backward"
         ).set_index("index")
         
-        # Nettoyage des colonnes après merge
+        # Cols cleaning after merge
         if "filing_date" in df_formatted_aligned.columns:
             df_formatted_aligned = df_formatted_aligned.drop(columns=["filing_date"])
             
-        # Propagation de la dernière valeur connue (Forward Fill)
-        df_formatted_aligned.ffill(inplace=True, limit=limit_ffill)
+        # Propagate last known value (Forward Fill)
+        if self.config.limit_ffill_qdata is None:
+            lim_ffill = limit_ffill
+        else:
+            lim_ffill = self.config.limit_ffill_qdata
+        df_formatted_aligned.ffill(inplace=True, limit=lim_ffill)
         return df_formatted_aligned
 
     # ***----------------------***
@@ -95,7 +99,7 @@ class FeatureEngineering:
     def _compute_sentiment_features(self) -> None:
         """Compute all NLP features in a single pass"""
         if self.data.mapping_df is None or self.data.mapping_df.empty:
-            logger.error("Aucun document trouvé dans mapping_df. Vérifiez le chargement initial.")
+            logger.error("No doc found in mapping_df. Check initial loading.")
             return
 
         df = self.data.mapping_df.copy()

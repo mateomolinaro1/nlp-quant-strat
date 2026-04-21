@@ -88,6 +88,12 @@ class DataManager:
         asset_returns_obj = getattr(self, attr_name)
         return asset_returns_obj
 
+    def get_words_dict(self) -> pd.DataFrame:
+        attr_name = "words_dict"
+        if not hasattr(self, attr_name) or getattr(self, attr_name) is None:
+            raise AttributeError(f"Attribute '{attr_name}' not found or not loaded. Did you call load_data()?")
+        return getattr(self, attr_name)
+
     def get_benchmark_returns(self) -> pd.DataFrame:
         """
         helper to get the benchmark returns dataframe from the corresponding attribute, which is named after the
