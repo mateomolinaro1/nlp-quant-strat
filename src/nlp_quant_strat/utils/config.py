@@ -52,6 +52,9 @@ class Config:
         self.transaction_costs: float|int|None = None
         self.strategy_name: str|None = None
 
+        # Outputs
+        self.rolling_window_performance: int | None = None
+
         # Load JSON config to attributes of Config class
         self._load_run_pipeline_config()
 
@@ -108,3 +111,7 @@ class Config:
                     self.transaction_costs = config.get("BACKTEST").get("TRANSACTION_COSTS_BPS")
                 if config.get("BACKTEST").get("STRATEGY_NAME") is not None:
                     self.strategy_name = config.get("BACKTEST").get("STRATEGY_NAME")
+
+            # Outputs
+            if config.get("OUTPUTS").get("ROLLING_WINDOW_PERFORMANCE") is not None:
+                self.rolling_window_performance = config.get("OUTPUTS").get("ROLLING_WINDOW_PERFORMANCE")
