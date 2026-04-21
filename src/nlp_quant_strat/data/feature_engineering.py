@@ -127,20 +127,20 @@ class FeatureEngineering:
                     pos_counts[i] = sum(1 for w in words if w in pos_set)
                     neg_counts[i] = sum(1 for w in words if w in neg_set)
 
-        # Calcul des colonnes brutes
+        # Calcul des cols brutes
         df["pos_count"] = pos_counts
         df["neg_count"] = neg_counts
         df["word_count"] = total_word_counts
-        # Polarité : (Pos - Neg) / (Pos + Neg + 1)
+        # Polarity : (Pos - Neg) / (Pos + Neg + 1)
         df["polarity"] = (df["pos_count"] - df["neg_count"]) / (df["pos_count"] + df["neg_count"] + 1)
         df["sentiment_density"] = df["pos_count"] / (df["word_count"] + 1)
         df["is_pos_polarity"] = (df["polarity"] > 0).astype(int)
 
-        # Calculs temporels par Asset
+        # Temporal computations per Asset
         df = df.sort_values(['asset', 'filing_date'])
         
-        # Momentum : Count de polarité positive sur Q trimestres
-        # On utilise une fenêtre roulante sur les rapports publiés
+        # Momentum : Count de polarity positive sur Q quarters
+        # On utilise une rolling window sur les published rapports
         df[f"pos_polarity_count_{self.q}q"] = (
             df.groupby("asset")["is_pos_polarity"]
             .rolling(window=self.q, min_periods=1)
@@ -148,10 +148,10 @@ class FeatureEngineering:
             .reset_index(level=0, drop=True)
         )
         
-        # Delta : Changement de ton vs rapport précédent
+        # Delta : change de ton vs rapport précédent
         df["polarity_delta"] = df.groupby("asset")["polarity"].diff()
 
-        # Alignement et stockage dans les attributs de la classe
+        # Alignment and storage in attributes
         logger.info("Aligning features to market grid...")
         self.positive_count = self._format_df(df, "pos_count")
         self.negative_count = self._format_df(df, "neg_count")
@@ -161,7 +161,7 @@ class FeatureEngineering:
         self.pos_polarity_count_q = self._format_df(df, f"pos_polarity_count_{self.q}q")
         self.polarity_delta = self._format_df(df, "polarity_delta")
 
-        # Sauvegarde automatique après calcul vers S3
+        # Automatic saving après calcul vers S3
         self._save_features_to_s3()
         logger.info("Feature engineering completed and saved to S3.")
 
@@ -195,7 +195,7 @@ class FeatureEngineering:
                     setattr(self, feat, val)
                 logger.info("All features loaded successfully from S3.")
             except Exception as e:
-                logger.warning(f"Impossible de charger les features ({e}). Lancement du calcul...")
+                logger.warning(f"Impossible de charger les features ({e}). Launching du calcul...")
                 self._compute_sentiment_features()
         else:
             self._compute_sentiment_features()

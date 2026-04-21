@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
 
-# Imports projet
+# Imports
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.data.feature_engineering import FeatureEngineering
 from nlp_quant_strat.utils.config import Config
@@ -16,9 +16,9 @@ from nlp_quant_strat.backtester.visualization import Visualizer
 from nlp_quant_strat.utils.utils import S3Utils
 
 def cross_zscore(df):
-    """Version robuste du Z-score cross-sectionnel"""
+    """Robust version of cross-sectional Z-score"""
     mean = df.mean(axis=1)
-    std = df.std(axis=1).replace(0, 1) # Évite la division par 0
+    std = df.std(axis=1).replace(0, 1) # Avoid la division par 0
     return df.sub(mean, axis=0).div(std, axis=0)
 
 def main():
@@ -33,20 +33,20 @@ def main():
     )
     logger = logging.getLogger("FinalAnalysis")
 
-    # 2. Chargement des données
-    logger.info("Chargement des données depuis S3...")
+    # 2. Loading des données
+    logger.info("Loading des données from S3...")
     data_manager = DataManager(config=config)
     data_manager.load_data()
 
     # 3. Feature Engineering
-    logger.info("Traitement des features NLP...")
+    logger.info("Treating des features NLP...")
     feature_engineering = FeatureEngineering(data=data_manager, config=config)
     feature_engineering.build_features()
 
-    # --- CORRECTION 1 : Sauvegarde de TOUTES les features implémentées ---
+    # --- CORRECTION 1 : saving de all features implemented ---
     if config.load_or_compute_features == "compute":
-        logger.info("Sauvegarde de l'ensemble des features sur S3...")
-        # On utilise la liste définie dans la classe FeatureEngineering
+        logger.info("saving all des features sur S3...")
+        # On utilise la defined list dans la class FeatureEngineering
         for feat_name in feature_engineering.feature_names:
             df_to_save = getattr(feature_engineering, feat_name)
             if df_to_save is not None:
@@ -56,25 +56,24 @@ def main():
                     path=f"data/features/{feat_name}.parquet"
                 )
 
-    # 4. Stratégie (Combinaison Multi-Facteurs)
-    # 4. Stratégie (Combinaison Multi-Facteurs)
-    logger.info("Combinaison des signaux : Polarity + Polarity_Delta")
+    # 4. Strategy (multi-factor combination)
+    logger.info("Combination of signals: Polarity + Polarity_Delta")
     
-    # On récupère les deux signaux
+    # retrieve signals
     z1 = cross_zscore(feature_engineering.polarity)
     z2 = cross_zscore(feature_engineering.polarity_delta)
 
-    # SOMME ROBUSTE : On additionne les Z-scores
-    # On remplace les 0 par NaN AVANT d'additionner pour ne pas polluer les moyennes
+    # SOMME ROBUST : On add les Z-scores
+    # On replace les 0 par NaN AVANT add pour ne pas pollute les averages
     composite_signal = z1.add(z2, fill_value=0) / 2
     
-    # --- LA LIGNE MAGIQUE ---
-    # On remplace les 0 par NaN pour que les percentiles ne soient calculés 
-    # QUE sur les actions qui ont un vrai signal NLP ce jour-là.
+    # --- LA LIGN MAGIQUE ---
+    # On replace les 0 par NaN pour que les percentiles not to be computed
+    # QUE sur les actions qui ont un true signal NLP ce jour-là.
     composite_signal = composite_signal.replace(0, np.nan)
     # ------------------------
 
-    logger.info(f"Nombre de signaux actifs (non-NaN) : {composite_signal.notna().sum().sum()}")
+    logger.info(f"Number of active signals (non-NaN) : {composite_signal.notna().sum().sum()}")
 
     strategy = CrossSectionalPercentiles(
         returns=data_manager.get_asset_returns(),
@@ -82,30 +81,30 @@ def main():
         percentiles_winsorization=config.percentiles_winsorization,
     )
     
-    # 4. Stratégie
+    # 4. Strategy
     strategy.compute_signals_values()
     signals = strategy.compute_signals(
         percentiles_portfolios=config.percentiles_portfolios,
         industry_segmentation=None if config.industry_segmentation == "" else "with_industry_segmentation",
     )
 
-    # --- ACTION : PROPAGATION DES SIGNAUX ---
-    # On propage les 1 et les -1 pendant 66 jours (rebal_periods)
-    # pour qu'ils soient visibles lors de la prochaine date de rebalancement.
+    # --- ACTION : PROPAGATION DES SIGNALS ---
+    # On propagate les 1 et les -1 pendant 66 jours (rebal_periods)
+    # to be visible for the next rebalancing date.
     signals = signals.replace(0, np.nan).ffill(limit=config.rebal_periods).fillna(0)
     # ----------------------------------------
 
     # Diagnostic mis à jour
     num_buys = (signals == 1).sum().sum()
-    logger.info(f"Nombre de signaux d'ACHAT (après propagation) : {num_buys}")
+    logger.info(f"Number of buy signals (après propagation) : {num_buys}")
 
     if num_buys == 0:
-        logger.error("❌ La stratégie n'a généré AUCUN achat. Vérifiez les percentiles.")
+        logger.error("❌ Strategy generated no buy. Check percentiles.")
         return
     # ------------------
     
-    # 5. Construction du Portefeuille
-    logger.info("Rebalancement du portefeuille...")
+    # 5. Construction du Ptf
+    logger.info("Rebal Ptf...")
     ptf = EqualWeightingScheme(
         returns=data_manager.get_asset_returns(),
         signals=signals,
@@ -113,17 +112,17 @@ def main():
         portfolio_type=config.portfolio_type
     )
     
-    # --- SÉCURITÉ ANTI-INDEXERROR ---
-    # On vérifie si on a des dates de rebalancement valides avant de lancer
+    # --- SECURITY ANTI-INDEX ERROR ---
+    # On check si on a des dates de rebal valid avant de lancer
     if signals.sum(axis=1).abs().sum() == 0:
-        logger.error("❌ Aucun signal détecté par la stratégie. Portefeuille vide.")
+        logger.error("❌ No signal detected for the strategy. Ptf is void.")
         return
         
     ptf.compute_weights()
     ptf.rebalance_portfolio()
 
     # 6. Backtest
-    logger.info("Lancement du Backtest...")
+    logger.info("Launching Backtest...")
     backtester = Backtest(
         returns=data_manager.get_asset_returns(),
         weights=ptf.rebalanced_weights,
@@ -134,7 +133,7 @@ def main():
     backtester.run_backtest()
 
     # 7. ANALYSE
-    logger.info("Analyse des métriques...")
+    logger.info("Analyzing metrics...")
     perf_analyzer = PerformanceAnalyser(
         portfolio_returns=backtester.cropped_portfolio_net_returns,
         freq=config.market_data_frequency,
@@ -144,12 +143,12 @@ def main():
     )
     metrics = perf_analyzer.compute_metrics()
 
-    # 8. Affichage
+    # 8. Display
     print("\n" + "="*60)
-    print(f"RÉSULTATS : {config.strategy_name} (Signal: COMPOSITE)")
+    print(f"RESULTS : {config.strategy_name} (Signal: COMPOSITE)")
     print("="*60)
-    # ... (Le reste de ton code d'affichage est identique)
-    print(pd.DataFrame(metrics, index=[0]).T) # Affichage rapide pour test
+    # ... (Le rest de ton code de display est same)
+    print(pd.DataFrame(metrics, index=[0]).T) # Display quick pour test
     print("="*60)
 
     # 9. Visualisation
