@@ -125,7 +125,7 @@ def main():
     logger.info("Launching Backtest...")
     backtester = Backtest(
         returns=data_manager.get_asset_returns(),
-        weights=ptf.rebalanced_weights,
+        weights=ptf.rebalanced_weights.shift(1), # Shift weights to account for implementation lag
         turnover=ptf.turnover,
         transaction_costs=config.transaction_costs,
         strategy_name=f"{config.strategy_name}_COMPOSITE"
