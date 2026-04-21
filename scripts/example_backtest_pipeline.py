@@ -1,98 +1,76 @@
-from nlp_quant_strat.backtester import data, signal_utilities, strategies, portfolio, backtest_pandas, analysis
+from nlp_quant_strat.data.data_manager import DataManager
+from nlp_quant_strat.data.feature_engineering import FeatureEngineering
 from nlp_quant_strat.utils.config import Config
+from nlp_quant_strat.backtester.strategies import CrossSectionalPercentiles
+from nlp_quant_strat.backtester.portfolio import EqualWeightingScheme
+from nlp_quant_strat.backtester.backtest import Backtest
+from nlp_quant_strat.backtester.analysis import PerformanceAnalyser
+from nlp_quant_strat.backtester.visualization import Visualizer
 from dotenv import load_dotenv
+import logging
+import sys
+
 load_dotenv()
 config = Config()
+logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 
-ds = data.AmazonS3(
-    bucket_name=config.aws_bucket_name,
-    s3_object_name="data/wrds_gross_query.parquet",
-)
-dm = data.DataManager(
-    data_source=ds,
-    max_consecutive_nan=5,
-    rebase_prices=False,
-    n_implementation_lags=1,
-    already_returns=True
-)
-dm.get_data(
-    format_date="%Y-%m-%d",
-    crop_lookback_period=0
-)
+# Data
+data_manager = DataManager(config=config)
+data_manager.load_data()
 
-# Strategy setup and benchmark
-strategy = strategies.CrossSectionalPercentiles(
-    returns=dm.returns,
-    signal_function=signal_utilities.Momentum.rolling_momentum,
-    signal_function_inputs={"df": dm.cleaned_data,
-                            "nb_period": 252,
-                            "nb_period_to_exclude": 22,
-                            "exclude_last_period": True
-                            },
-    percentiles_winsorization=(2,98)
+# Features
+feature_engineering = FeatureEngineering(data=data_manager, config=config)
+feature_engineering.build_features()
+
+# Backtest
+strategy = CrossSectionalPercentiles(
+    returns=data_manager.get_asset_returns(),
+    signal_function=None,
+    signal_function_inputs=None,
+    signal_values=feature_engineering.positive_count,
+    percentiles_winsorization=config.percentiles_winsorization,
 )
 strategy.compute_signals_values()
-strategy.compute_signals(
-    percentiles_portfolios=(10,90),
-    industry_segmentation=None
+signals = strategy.compute_signals(
+    percentiles_portfolios=config.percentiles_portfolios,
+    industry_segmentation=None if config.industry_segmentation == "" else "with_industry_segmentation",
 )
 
-bench = strategies.BuyAndHold(
-    returns=dm.returns
-)
-bench.compute_signals_values()
-bench.compute_signals()
-
-# Portfolio level
-ptf = portfolio.EqualWeightingScheme(
-    returns=dm.returns,
-    signals=strategy.signals,
-    rebal_periods=22,
-    portfolio_type="long_only"
+ptf = EqualWeightingScheme(
+    returns=data_manager.get_asset_returns(),
+    signals=signals,
+    rebal_periods=config.rebal_periods,
+    portfolio_type=config.portfolio_type
 )
 ptf.compute_weights()
 ptf.rebalance_portfolio()
 
-ptf_bench = portfolio.EqualWeightingScheme(
-    returns=dm.returns,
-    signals=bench.signals,
-    rebal_periods=22,
-    portfolio_type="long_only"
-)
-ptf_bench.compute_weights()
-ptf_bench.rebalance_portfolio()
-
-# Backtesting
-backtester = backtest_pandas.Backtest(
-    returns=dm.returns,
-    weights=ptf.rebalanced_weights.shift(1),  # Shift weights to account for implementation lag
+backtester = Backtest(
+    returns=data_manager.get_asset_returns(),
+    weights=ptf.rebalanced_weights,
     turnover=ptf.turnover,
-    transaction_costs=10,
-    strategy_name="CSMOM"
+    transaction_costs=config.transaction_costs,
+    strategy_name=config.strategy_name
 )
 backtester.run_backtest()
 
-backtester_bench = backtest_pandas.Backtest(
-    returns=dm.returns,
-    weights=ptf_bench.rebalanced_weights.shift(1),  # Shift weights to account for implementation lag
-    turnover=ptf_bench.turnover,
-    transaction_costs=10,
-    strategy_name="BUY_AND_HOLD"
-)
-backtester_bench.run_backtest()
-
-
-# Performance Analysis
-analyzer = analysis.PerformanceAnalyser(
+perf_analyzer = PerformanceAnalyser(
     portfolio_returns=backtester.cropped_portfolio_net_returns,
-    bench_returns=backtester_bench.portfolio_net_returns.loc[backtester.start_date:, :],
-    freq="d",
-    percentiles=str((10,90)),
-    # industries="Cross Industries" if self.industry_segmentation is None else "Intra Industries",
-    industries="Cross_Industries",
-    # rebal_freq=f"{self.rebal_periods} {self.freq_data}"
-    rebal_freq=f"{22} {'d'}"
+    freq=config.market_data_frequency,
+    zscores=None,
+    bench_returns=data_manager.get_benchmark_returns(),
+    forward_returns=None,
+    percentiles=f"({config.percentiles_portfolios[0]}-{config.percentiles_portfolios[1]})",
+    industries="without ind. seg." if config.industry_segmentation == "" else "with industries segmentation",
+    rebal_freq=f"{config.rebal_periods} days"
 )
-analyzer.compute_metrics()
-analyzer.plot_cumulative_performance(saving_path="./outputs/backtest/figures/cumulative_performance.png")
-bench_net_returns = backtester_bench.portfolio_net_returns.loc[backtester.start_date:, :]
+perf_analyzer.compute_metrics()
+
+vizu = Visualizer(performance=perf_analyzer)
+vizu.plot_cumulative_performance(
+    saving_path=config.ROOT_DIR / "outputs" / "figures" / f"{config.strategy_name}_cumulative_returns.png"
+)
