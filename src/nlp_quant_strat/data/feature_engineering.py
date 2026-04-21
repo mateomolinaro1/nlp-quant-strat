@@ -6,7 +6,6 @@ import pandas as pd
 import logging
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
-from nlp_quant_strat.utils.utils import S3Utils
 
 logger = logging.getLogger(__name__)
 
