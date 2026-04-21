@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import logging
 import sys
 
+logger = logging.getLogger(__name__)
 load_dotenv()
 config = Config()
 logging.basicConfig(
@@ -31,7 +32,7 @@ for feature_name in config.strategy_name:
     (config.ROOT_DIR / "outputs" / "figures" / feature_name).mkdir(parents=True, exist_ok=True)
 
 for feature_name in config.strategy_name:
-
+    logger.info(f"Backtesting strategy based on feature: {feature_name}...")
     # Backtest
     sv = getattr(feature_engineering, feature_name, None)
     strategy = CrossSectionalPercentiles(
@@ -80,19 +81,19 @@ for feature_name in config.strategy_name:
 
     vizu = Visualizer(performance=perf_analyzer)
     vizu.plot_cumulative_performance(
-        saving_path=config.ROOT_DIR / "outputs" / "figures" / feature_name / f"{config.strategy_name}_cumulative_returns.png"
+        saving_path=config.ROOT_DIR / "outputs" / "figures" / feature_name / f"{feature_name}_cumulative_returns.png"
     )
     for metric in ["sharpe", "return", "vol"]:
         vizu.plot_rolling_metric(
             metric=metric,
             saving_path=config.ROOT_DIR / "outputs" / "figures" / feature_name /
-                        f"{config.strategy_name}_rolling_{metric}.png",
+                        f"{feature_name}_rolling_{metric}.png",
             window=config.rolling_window_performance
         )
     for metric in ["sharpe", "annualized_return", "vol"]:
         vizu.plot_yearly_metrics(
             metric=metric,
-            saving_path=config.ROOT_DIR / "outputs" / "figures" / feature_name / f"{config.strategy_name}_yearly_{metric}.png"
+            saving_path=config.ROOT_DIR / "outputs" / "figures" / feature_name / f"{feature_name}_yearly_{metric}.png"
         )
 
 # End

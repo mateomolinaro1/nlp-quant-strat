@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from typing import Union
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PerformanceAnalyser:
@@ -21,6 +23,10 @@ class PerformanceAnalyser:
         self.cumulative_performance_base_100 = None
         self.equity_curve = None
         self.metrics = None
+        self.rolling_metrics = None
+        self.rolling_metrics_bench = None
+        self.yearly_metrics = None
+        self.yearly_metrics_bench = None
         if freq not in ['d', 'w', 'm', 'y']:
             raise ValueError("freq must be in ['d', 'w', 'm', 'y'].")
         self.freq = freq
@@ -243,7 +249,7 @@ class PerformanceAnalyser:
 
         # Metrics for bench
         if self.bench_returns is not None:
-            total_return_bench = self.bench_cumulative_perf.iloc[-1, 0]
+            total_return_bench = self.bench_cumulative_perf.iloc[-1, :]
             annualized_return_bench = (1 + total_return_bench) ** (freq_num / len(self.bench_returns)) - 1
             volatility_bench = self.bench_returns.std() * np.sqrt(freq_num)
             sharpe_ratio_bench = annualized_return_bench / volatility_bench
@@ -255,17 +261,193 @@ class PerformanceAnalyser:
             sharpe_ratio_bench=None
             max_drawdown_bench=None
 
-        return {
+        self.metrics = {
             "total_return": total_return,
             "annualized_return": annualized_return,
-            "annualized_volatility": volatility.values[0],
-            "annualized_sharpe_ratio": sharpe_ratio.values[0],
-            "max_drawdown": max_drawdown.values[0],
+            "annualized_volatility": volatility.iloc[0],
+            "annualized_sharpe_ratio": sharpe_ratio.iloc[0],
+            "max_drawdown": max_drawdown.iloc[0],
+
+            # --- BENCH (NOW ALL SERIES) ---
             "total_return_bench": total_return_bench,
             "annualized_return_bench": annualized_return_bench,
-            "annualized_volatility_bench": volatility_bench.values[0],
-            "annualized_sharpe_ratio_bench": sharpe_ratio_bench.values[0],
-            "max_drawdown_bench": max_drawdown_bench.values[0],
+            "annualized_volatility_bench": volatility_bench,
+            "annualized_sharpe_ratio_bench": sharpe_ratio_bench,
+            "max_drawdown_bench": max_drawdown_bench,
         }
+        logger.info("Metrics computed")
+        return
+
+    def compute_rolling_metrics(self, window: int = 252):
+
+        if self.portfolio_returns is None:
+            raise ValueError("Portfolio returns not defined")
+
+        freq_mapping = {'d': 252, 'w': 52, 'm': 12, 'y': 1}
+        freq_num = freq_mapping[self.freq]
+
+        returns = self.portfolio_returns
+        if isinstance(returns, pd.Series):
+            returns = returns.to_frame()
+
+        # --- Rolling total return (geometric over window) ---
+        rolling_total_return = (1 + returns).rolling(window).apply(lambda x: x.prod(), raw=True) - 1
+
+        # --- Annualized rolling return (same formula as compute_metrics) ---
+        rolling_annualized_return = (1 + rolling_total_return) ** (freq_num / window) - 1
+
+        # --- Rolling volatility ---
+        rolling_vol = returns.rolling(window).std() * np.sqrt(freq_num)
+
+        # --- Rolling Sharpe (your definition) ---
+        rolling_sharpe = rolling_annualized_return / rolling_vol
+
+        # --- Store results ---
+        self.rolling_metrics = {
+            "return": rolling_annualized_return,
+            "vol": rolling_vol,
+            "sharpe": rolling_sharpe
+        }
+
+        # --- Benchmark ---
+        if self.bench_returns is not None:
+
+            bench = self.bench_returns
+            if isinstance(bench, pd.Series):
+                bench = bench.to_frame()
+
+            bench_total_return = (1 + bench).rolling(window).apply(lambda x: x.prod(), raw=True) - 1
+            bench_annualized_return = (1 + bench_total_return) ** (freq_num / window) - 1
+            bench_vol = bench.rolling(window).std() * np.sqrt(freq_num)
+            bench_sharpe = bench_annualized_return / bench_vol
+
+            self.rolling_metrics_bench = {
+                "return": bench_annualized_return,
+                "vol": bench_vol,
+                "sharpe": bench_sharpe
+            }
+
+        return self.rolling_metrics
+
+    def compute_yearly_metrics(self):
+        """
+        Compute yearly performance metrics for the strategy and the benchmark (if provided). The metrics include:
+        - Total return (geometric) for each year
+        - Annualized return for each year (consistent with the formula used in compute_metrics)
+        - Volatility for each year
+        - Sharpe ratio for each year (using the annualized return and volatility)
+        :return:
+        """
+
+        if self.portfolio_returns is None:
+            raise ValueError("Portfolio returns not defined")
+
+        freq_mapping = {'d': 252, 'w': 52, 'm': 12, 'y': 1}
+        freq_num = freq_mapping[self.freq]
+
+        def _compute_yearly(df):
+
+            if isinstance(df, pd.Series):
+                df = df.to_frame()
+
+            if not isinstance(df.index, pd.DatetimeIndex):
+                raise ValueError("Index must be a DatetimeIndex")
+
+            results = {}
+
+            for col in df.columns:
+
+                series = df[col].dropna()
+
+                # --- group by calendar year ---
+                grouped = series.groupby(series.index.year)
+
+                yearly_data = []
+
+                for year, group in grouped:
+
+                    n_obs = len(group)
+                    if n_obs == 0:
+                        continue
+
+                    # --- total return (geometric) ---
+                    total_return = (1 + group).prod() - 1
+
+                    # --- annualized return (consistent with compute_metrics) ---
+                    annualized_return = (1 + total_return) ** (freq_num / n_obs) - 1
+
+                    # --- volatility ---
+                    volatility = group.std() * np.sqrt(freq_num)
+
+                    # --- sharpe ---
+                    sharpe = annualized_return / volatility if volatility != 0 else np.nan
+
+                    yearly_data.append({
+                        "year": year,
+                        "total_return": total_return,
+                        "annualized_return": annualized_return,
+                        "vol": volatility,
+                        "sharpe": sharpe,
+                        "n_obs": n_obs  # useful diagnostic
+                    })
+
+                # --- convert to DataFrame ---
+                yearly_df = pd.DataFrame(yearly_data)
+
+                if not yearly_df.empty:
+                    yearly_df = yearly_df.set_index("year").sort_index()
+
+                results[col] = yearly_df
+
+            return results
+
+        # =========================
+        # ===== STRATEGY ==========
+        # =========================
+        self.yearly_metrics = _compute_yearly(self.portfolio_returns)
+
+        # =========================
+        # ===== BENCHMARK =========
+        # =========================
+        if self.bench_returns is not None:
+            self.yearly_metrics_bench = _compute_yearly(self.bench_returns)
+        else:
+            self.yearly_metrics_bench = None
+
+        return self.yearly_metrics
+
+    @staticmethod
+    def stack_yearly_metrics(yearly_dict: dict) -> pd.DataFrame:
+        """
+        Convert yearly_metrics dict into a flat DataFrame.
+
+        Input:
+            {
+                "asset1": DataFrame(index=year, columns=metrics),
+                "asset2": ...
+            }
+
+        Output:
+            DataFrame with columns:
+            ['year', 'asset', 'total_return', 'annualized_return', 'vol', 'sharpe', 'n_obs']
+        """
+
+        rows = []
+
+        for asset, df in yearly_dict.items():
+
+            if df is None or df.empty:
+                continue
+
+            tmp = df.copy()
+            tmp["asset"] = asset
+            tmp["year"] = tmp.index
+
+            rows.append(tmp)
+
+        if len(rows) == 0:
+            return pd.DataFrame()
+
+        return pd.concat(rows, axis=0).reset_index(drop=True)
 
 
