@@ -6,6 +6,7 @@ import pandas as pd
 import logging
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
+from nlp_quant_strat.utils.utils import S3Utils
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class FeatureEngineering:
         for feat in self.feature_names:
             setattr(self, feat, None)
 
+        # Fenêtre glissante pour le momentum (ex: 4 trimestres)
         self.q = getattr(self.config, 'sentiment_rolling_window', 4)
 
     # ***----------------------***
@@ -34,6 +36,10 @@ class FeatureEngineering:
     def _build_yearly_dicts(self):
         """Build yearly sentiment dictionaries (Loughran-McDonald logic)"""
         logger.info("Building yearly sentiment dictionaries...")
+        # Sécurité si mapping_df est vide
+        if self.data.mapping_df is None or self.data.mapping_df.empty:
+            raise ValueError("mapping_df est vide. Impossible de construire les dictionnaires annuels.")
+
         years = self.data.mapping_df['filing_date'].dt.year.unique()
         words_df = self.data.words_dict
         words_df["Word"] = words_df["Word"].str.lower()
@@ -88,6 +94,10 @@ class FeatureEngineering:
 
     def _compute_sentiment_features(self) -> None:
         """Compute all NLP features in a single pass"""
+        if self.data.mapping_df is None or self.data.mapping_df.empty:
+            logger.error("Aucun document trouvé dans mapping_df. Vérifiez le chargement initial.")
+            return
+
         df = self.data.mapping_df.copy()
         n = len(df)
         logger.info(f"Starting NLP computation for {n} documents...")
@@ -117,6 +127,7 @@ class FeatureEngineering:
         df["pos_count"] = pos_counts
         df["neg_count"] = neg_counts
         df["word_count"] = total_word_counts
+        # Polarité : (Pos - Neg) / (Pos + Neg + 1)
         df["polarity"] = (df["pos_count"] - df["neg_count"]) / (df["pos_count"] + df["neg_count"] + 1)
         df["sentiment_density"] = df["pos_count"] / (df["word_count"] + 1)
         df["is_pos_polarity"] = (df["polarity"] > 0).astype(int)
@@ -125,6 +136,7 @@ class FeatureEngineering:
         df = df.sort_values(['asset', 'filing_date'])
         
         # Momentum : Count de polarité positive sur Q trimestres
+        # On utilise une fenêtre roulante sur les rapports publiés
         df[f"pos_polarity_count_{self.q}q"] = (
             df.groupby("asset")["is_pos_polarity"]
             .rolling(window=self.q, min_periods=1)
@@ -135,7 +147,7 @@ class FeatureEngineering:
         # Delta : Changement de ton vs rapport précédent
         df["polarity_delta"] = df.groupby("asset")["polarity"].diff()
 
-        # Alignement et stockage
+        # Alignement et stockage dans les attributs de la classe
         logger.info("Aligning features to market grid...")
         self.positive_count = self._format_df(df, "pos_count")
         self.negative_count = self._format_df(df, "neg_count")
@@ -145,17 +157,23 @@ class FeatureEngineering:
         self.pos_polarity_count_q = self._format_df(df, f"pos_polarity_count_{self.q}q")
         self.polarity_delta = self._format_df(df, "polarity_delta")
 
-        # Sauvegarde automatique après calcul
+        # Sauvegarde automatique après calcul vers S3
         self._save_features_to_s3()
-        logger.info("Feature engineering completed and saved.")
+        logger.info("Feature engineering completed and saved to S3.")
 
     def _save_features_to_s3(self):
-        """Helper to persist features"""
+        """Helper to persist features using S3Utils to keep index integrity"""
         for feat in self.feature_names:
             df = getattr(self, feat)
             if df is not None:
                 key = f"data/features/{feat}.parquet"
-                self.data.aws.s3.save(df, key=key)
+                logger.info(f"Uploading {feat} to S3 bucket: {self.config.bucket_name}")
+                # CORRECTION : Utilisation de S3Utils.upload_df_with_index au lieu de .save
+                S3Utils.upload_df_with_index(
+                    df=df, 
+                    bucket=self.config.bucket_name, 
+                    path=key
+                )
 
     # =========================
     # Public API
@@ -168,11 +186,12 @@ class FeatureEngineering:
             try:
                 logger.info("Attempting to load all features from S3...")
                 for feat in self.feature_names:
-                    val = self.data.aws.s3.load(key=f"data/features/{feat}.parquet")
+                    key = f"data/features/{feat}.parquet"
+                    val = self.data.aws.s3.load(key=key)
                     setattr(self, feat, val)
-                logger.info("All features loaded successfully.")
+                logger.info("All features loaded successfully from S3.")
             except Exception as e:
-                logger.warning(f"Error loading features: {e}. Falling back to computation.")
+                logger.warning(f"Impossible de charger les features ({e}). Lancement du calcul...")
                 self._compute_sentiment_features()
         else:
             self._compute_sentiment_features()
