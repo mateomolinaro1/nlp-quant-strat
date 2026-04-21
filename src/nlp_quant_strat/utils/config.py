@@ -40,6 +40,8 @@ class Config:
 
         # Feature engineering
         self.load_or_compute_features: str|None = None
+        self.rolling_window_quarters: int|None = None
+        self.limit_ffill_qdata: int|None = None
 
         # Backtest
         self.percentiles_winsorization: Tuple[int, int]|None = None
@@ -51,7 +53,7 @@ class Config:
         self.strategy_name: str|None = None
 
         # Outputs
-        self.rolling_window_performance: int|None = None
+        self.rolling_window_performance: int | None = None
 
         # Load JSON config to attributes of Config class
         self._load_run_pipeline_config()
@@ -88,6 +90,10 @@ class Config:
             if config.get("FEATURE_ENGINEERING") is not None:
                 if config.get("FEATURE_ENGINEERING").get("LOAD_OR_COMPUTE") is not None:
                     self.load_or_compute_features = config.get("FEATURE_ENGINEERING").get("LOAD_OR_COMPUTE")
+                if config.get("FEATURE_ENGINEERING").get("ROLLING_WINDOW_QUARTERS") is not None:
+                    self.rolling_window_quarters = config.get("FEATURE_ENGINEERING").get("ROLLING_WINDOW_QUARTERS")
+                if config.get("FEATURE_ENGINEERING").get("LIMIT_FFILL_QDATA") is not None:
+                    self.limit_ffill_qdata = config.get("FEATURE_ENGINEERING").get("LIMIT_FFILL_QDATA")
 
             # Backtest
             if config.get("BACKTEST") is not None:

@@ -35,9 +35,22 @@ class DataManager:
         if self.aws is None:
             self._init_s3()
 
+        transcript_attr = Path(self.config.formatted_unprocessed_transcripts_filename).stem
+
         for filename in self.config.filenames_to_load:
             name = Path(filename).stem
+            logger.info(f"Loading {filename}...")
+            
             obj = self.aws.s3.load(key=filename)
+            
+            # --- MODIFICATION ICI ---
+            if name == transcript_attr:
+                logger.info(f"Optimisation : On supprime la colonne texte pour sauver la RAM")
+                # On ne garde que les colonnes de mapping (date, ticker, asset)
+                columns_to_keep = [c for c in obj.columns if c != 'transcript']
+                obj = obj[columns_to_keep]
+            # --------------------------
+
             setattr(self, name, obj)
 
         self._set_dates()
@@ -74,6 +87,12 @@ class DataManager:
 
         asset_returns_obj = getattr(self, attr_name)
         return asset_returns_obj
+
+    def get_words_dict(self) -> pd.DataFrame:
+        attr_name = "words_dict"
+        if not hasattr(self, attr_name) or getattr(self, attr_name) is None:
+            raise AttributeError(f"Attribute '{attr_name}' not found or not loaded. Did you call load_data()?")
+        return getattr(self, attr_name)
 
     def get_benchmark_returns(self) -> pd.DataFrame:
         """
