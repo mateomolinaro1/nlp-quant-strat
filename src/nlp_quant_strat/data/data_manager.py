@@ -43,10 +43,10 @@ class DataManager:
             
             obj = self.aws.s3.load(key=filename)
             
-            # --- MODIFICATION ICI ---
+            # --- SAVING RAM HERE ---
             if name == transcript_attr:
-                logger.info(f"Optimisation : On supprime la colonne texte pour sauver la RAM")
-                # On ne garde que les colonnes de mapping (date, ticker, asset)
+                logger.info(f"We delete text columns to save RAM")
+                # We keep only the mapping columns (date, ticker, asset)
                 columns_to_keep = [c for c in obj.columns if c != 'transcript']
                 obj = obj[columns_to_keep]
             # --------------------------

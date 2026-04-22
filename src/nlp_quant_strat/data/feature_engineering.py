@@ -1,5 +1,6 @@
 """
 This module implements the feature engineering logic for the NLP quant strategy.
+It computes sentiment metrics from financial transcripts using the Loughran-McDonald logic.
 """
 import numpy as np
 import pandas as pd
@@ -22,7 +23,7 @@ class FeatureEngineering:
             "polarity", "sentiment_density", "pos_polarity_count_q", "polarity_delta"
         ]
         
-        # Initialisation des attributes à None
+        # Initialize attributes to None
         for feat in self.feature_names:
             setattr(self, feat, None)
 
@@ -36,7 +37,6 @@ class FeatureEngineering:
     def _build_yearly_dicts(self):
         """Build yearly sentiment dictionaries (Loughran-McDonald logic)"""
         logger.info("Building yearly sentiment dictionaries...")
-        # Security if mapping is None
         if self.data.mapping_df is None or self.data.mapping_df.empty:
             raise ValueError("mapping_df is None. Impossible to build yearly dict.")
 
@@ -64,14 +64,11 @@ class FeatureEngineering:
 
     def _format_df(self, df: pd.DataFrame, values_col: str, limit_ffill: int = 23 * 4) -> pd.DataFrame:
         """Format wide-type dataframe and align to asset returns"""
-        # Pivot pour passer en format (Date x Assets)
         df_formatted = df.pivot_table(columns="asset", index="filing_date", values=values_col)
         asset_returns = self.data.get_asset_returns()
         
-        # Realignment on asset universe
         df_formatted = df_formatted.reindex(columns=asset_returns.columns)
 
-        # Merge_asof pour aligner les dates de publication sur les dates de marché
         df_formatted_aligned = pd.merge_asof(
             asset_returns.reset_index()[['index']], 
             df_formatted.sort_index().reset_index(),
@@ -80,15 +77,10 @@ class FeatureEngineering:
             direction="backward"
         ).set_index("index")
         
-        # Cols cleaning after merge
         if "filing_date" in df_formatted_aligned.columns:
             df_formatted_aligned = df_formatted_aligned.drop(columns=["filing_date"])
             
-        # Propagate last known value (Forward Fill)
-        if self.config.limit_ffill_qdata is None:
-            lim_ffill = limit_ffill
-        else:
-            lim_ffill = self.config.limit_ffill_qdata
+        lim_ffill = getattr(self.config, 'limit_ffill_qdata', limit_ffill)
         df_formatted_aligned.ffill(inplace=True, limit=lim_ffill)
         return df_formatted_aligned
 
@@ -96,51 +88,38 @@ class FeatureEngineering:
     # ***-- Feature Compute ---***
     # ***----------------------***
 
-    def _compute_sentiment_features(self) -> None:
-        """Compute all NLP features in a single pass"""
-        if self.data.mapping_df is None or self.data.mapping_df.empty:
-            logger.error("No doc found in mapping_df. Check initial loading.")
-            return
+    def _tokenize_transcripts(self, df):
+        """Standard regex tokenization (Industry standard for LM Dict)"""
+        logger.info("Tokenizing transcripts...")
+        return df['transcript'].fillna("").str.lower().str.findall(r'\b\w+\b')
 
-        df = self.data.mapping_df.copy()
-        n = len(df)
-        logger.info(f"Starting NLP computation for {n} documents...")
-
-        yearly_pos, yearly_neg = self._build_yearly_dicts()
-        
+    def _count_sentiment_words(self, tokenized_series, yearly_pos, yearly_neg, years_series):
+        """Count positive/negative words in a single pass"""
+        n = len(tokenized_series)
         pos_counts = np.zeros(n, dtype=np.int32)
         neg_counts = np.zeros(n, dtype=np.int32)
-        total_word_counts = np.zeros(n, dtype=np.int32)
+        word_counts = np.zeros(n, dtype=np.int32)
 
-        logger.info("Tokenizing transcripts...")
-        tokenized = df['transcript'].fillna("").str.lower().str.findall(r'\b\w+\b')
+        for i, (words, year) in enumerate(zip(tokenized_series, years_series)):
+            word_counts[i] = len(words)
+            if word_counts[i] > 0:
+                pos_set, neg_set = yearly_pos[year], yearly_neg[year]
+                pos_counts[i] = sum(1 for w in words if w in pos_set)
+                neg_counts[i] = sum(1 for w in words if w in neg_set)
+        return pos_counts, neg_counts, word_counts
 
-        grouped = df.groupby(df['filing_date'].dt.year).groups
-        for year, indices in grouped.items():
-            logger.info(f"Processing year {year}...")
-            pos_set, neg_set = yearly_pos[year], yearly_neg[year]
-            
-            for i in indices:
-                words = tokenized.iloc[i]
-                total_word_counts[i] = len(words)
-                if total_word_counts[i] > 0:
-                    pos_counts[i] = sum(1 for w in words if w in pos_set)
-                    neg_counts[i] = sum(1 for w in words if w in neg_set)
-
-        # Calcul des cols brutes
-        df["pos_count"] = pos_counts
-        df["neg_count"] = neg_counts
-        df["word_count"] = total_word_counts
-        # Polarity : (Pos - Neg) / (Pos + Neg + 1)
+    def _compute_raw_scores(self, df):
+        """Compute base sentiment metrics"""
         df["polarity"] = (df["pos_count"] - df["neg_count"]) / (df["pos_count"] + df["neg_count"] + 1)
         df["sentiment_density"] = df["pos_count"] / (df["word_count"] + 1)
         df["is_pos_polarity"] = (df["polarity"] > 0).astype(int)
+        return df
 
-        # Temporal computations per Asset
+    def _compute_temporal_features(self, df):
+        """Compute Delta and Rolling Momentum features"""
         df = df.sort_values(['asset', 'filing_date'])
         
-        # Momentum : Count de polarity positive sur Q quarters
-        # On utilise une rolling window sur les published rapports
+        # Momentum: rolling sum of positive quarters
         df[f"pos_polarity_count_{self.q}q"] = (
             df.groupby("asset")["is_pos_polarity"]
             .rolling(window=self.q, min_periods=1)
@@ -148,10 +127,30 @@ class FeatureEngineering:
             .reset_index(level=0, drop=True)
         )
         
-        # Delta : change de ton vs rapport précédent
+        # Delta: Change in tone vs previous report
         df["polarity_delta"] = df.groupby("asset")["polarity"].diff()
+        return df
 
-        # Alignment and storage in attributes
+    def _compute_sentiment_features(self) -> None:
+        """Main computation orchestration"""
+        if self.data.mapping_df is None or self.data.mapping_df.empty:
+            logger.error("No documents found in mapping_df.")
+            return
+
+        df = self.data.mapping_df.copy()
+        yearly_pos, yearly_neg = self._build_yearly_dicts()
+        
+        # 1. Tokenization & Word Counting
+        tokenized = self._tokenize_transcripts(df)
+        pos, neg, total = self._count_sentiment_words(tokenized, yearly_pos, yearly_neg, df['filing_date'].dt.year)
+        
+        df["pos_count"], df["neg_count"], df["word_count"] = pos, neg, total
+
+        # 2. Score Computation
+        df = self._compute_raw_scores(df)
+        df = self._compute_temporal_features(df)
+
+        # 3. Alignment & Storage
         logger.info("Aligning features to market grid...")
         self.positive_count = self._format_df(df, "pos_count")
         self.negative_count = self._format_df(df, "neg_count")
@@ -161,41 +160,27 @@ class FeatureEngineering:
         self.pos_polarity_count_q = self._format_df(df, f"pos_polarity_count_{self.q}q")
         self.polarity_delta = self._format_df(df, "polarity_delta")
 
-        # Automatic saving après calcul vers S3
         self._save_features_to_s3()
-        logger.info("Feature engineering completed and saved to S3.")
-
-    def _save_features_to_s3(self):
-        """Helper to persist features using S3Utils to keep index integrity"""
-        for feat in self.feature_names:
-            df = getattr(self, feat)
-            if df is not None:
-                key = f"data/features/{feat}.parquet"
-                logger.info(f"Uploading {feat} to S3 bucket: {self.config.bucket_name}")
-                # CORRECTION : Utilisation de S3Utils.upload_df_with_index au lieu de .save
-                S3Utils.upload_df_with_index(
-                    df=df, 
-                    bucket=self.config.bucket_name, 
-                    path=key
-                )
 
     # =========================
     # Public API
     # =========================
     def build_features(self):
         """Main entry point: loads from S3 or triggers computation"""
-        logger.info("Building features...")
-        
-        if self.config.load_or_compute_features == "load":
+        if getattr(self.config, 'load_or_compute_features', 'load') == "load":
             try:
-                logger.info("Attempting to load all features from S3...")
                 for feat in self.feature_names:
-                    key = f"data/features/{feat}.parquet"
-                    val = self.data.aws.s3.load(key=key)
-                    setattr(self, feat, val)
-                logger.info("All features loaded successfully from S3.")
+                    self.__setattr__(feat, self.data.aws.s3.load(key=f"data/features/{feat}.parquet"))
+                logger.info("Features loaded from S3.")
             except Exception as e:
-                logger.warning(f"Impossible de charger les features ({e}). Launching du calcul...")
+                logger.warning(f"S3 load failed: {e}. Computing...")
                 self._compute_sentiment_features()
         else:
             self._compute_sentiment_features()
+
+    def _save_features_to_s3(self):
+        """Helper to persist features"""
+        for feat in self.feature_names:
+            df = getattr(self, feat)
+            if df is not None:
+                S3Utils.upload_df_with_index(df, self.config.bucket_name, f"data/features/{feat}.parquet")

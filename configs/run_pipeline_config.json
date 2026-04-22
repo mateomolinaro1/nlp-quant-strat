@@ -34,15 +34,7 @@
     "REBAL_PERIODS": 66,
     "PORTFOLIO_TYPE": "long_only",
     "TRANSACTION_COSTS_BPS": 10,
-    "STRATEGY_NAME": [
-      "positive_count",
-      "negative_count",
-      "word_count",
-      "polarity",
-      "sentiment_density",
-      "pos_polarity_count_q",
-      "polarity_delta"
-    ]
+    "STRATEGY_NAME": "NLP_ALPHA_V1"
   },
 
   "OUTPUTS": {
