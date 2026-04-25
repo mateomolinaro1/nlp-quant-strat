@@ -2,9 +2,12 @@
 This module implements the feature engineering logic for the NLP quant strategy.
 It computes sentiment metrics from financial transcripts using the Loughran-McDonald logic.
 """
+
 import numpy as np
 import pandas as pd
+import re
 import logging
+from scipy.stats import entropy
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
 from nlp_quant_strat.utils.utils import S3Utils
@@ -17,17 +20,16 @@ class FeatureEngineering:
         self.data = data
         self.config = config
         
-        # Features mapping to ease loading/saving
+        # Updated to match the "Alpha" features actually computed
         self.feature_names = [
-            "positive_count", "negative_count", "word_count", 
-            "polarity", "sentiment_density", "pos_polarity_count_q", "polarity_delta"
+            "pos_ratio", "neg_ratio", "net_sentiment", "sentiment_surprise", 
+            "sentiment_zscore", "sentiment_delta", "sent_var", 
+            "strong_neg_pct", "sent_eps_interaction", "valuation_sentiment_gap"
         ]
         
-        # Initialize attributes to None
         for feat in self.feature_names:
             setattr(self, feat, None)
 
-        # rolling window size for momentum feature (number of past quarters to look at)
         self.q = getattr(self.config, 'rolling_window_quarters', 4)
 
     # ***----------------------***
@@ -44,23 +46,28 @@ class FeatureEngineering:
         words_df = self.data.get_words_dict()
         words_df["Word"] = words_df["Word"].str.lower()
 
-        yearly_pos, yearly_neg = {}, {}
+        yearly_pos, yearly_neg, yearly_unc = {}, {}, {}
         words = words_df['Word'].values
         pos_flags = words_df['Positive'].values
         neg_flags = words_df['Negative'].values
+        unc_flags = words_df['Uncertainty'].values
 
         for year in years:
-            pos_set, neg_set = set(), set()
-            for word, p, n in zip(words, pos_flags, neg_flags):
+            pos_set, neg_set, unc_set = set(), set(), set()
+            for word, p, n, u in zip(words, pos_flags, neg_flags, unc_flags):
                 if isinstance(p, (int, float, np.integer, np.floating)):
                     if 0 < p <= year: pos_set.add(word)
                     elif p < 0 and -p <= year: pos_set.discard(word)
                 if isinstance(n, (int, float, np.integer, np.floating)):
                     if 0 < n <= year: neg_set.add(word)
                     elif n < 0 and -n <= year: neg_set.discard(word)
+                if isinstance(u, (int, float, np.integer, np.floating)):
+                    if 0 < u <= year: unc_set.add(word)
+                    elif u < 0 and -u <= year: unc_set.discard(word)
             yearly_pos[year] = pos_set
             yearly_neg[year] = neg_set
-        return yearly_pos, yearly_neg
+            yearly_unc[year] = unc_set
+        return yearly_pos, yearly_neg, yearly_unc
 
     def _format_df(self, df: pd.DataFrame, values_col: str, limit_ffill: int = 23 * 4) -> pd.DataFrame:
         """Format wide-type dataframe and align to asset returns"""
@@ -115,6 +122,29 @@ class FeatureEngineering:
         df["is_pos_polarity"] = (df["polarity"] > 0).astype(int)
         return df
 
+    def _compute_sentence_metrics(self, text, pos_set, neg_set):
+        """Calculates sentiment variance and entropy across sentences."""
+        # Split by common sentence delimiters
+        sentences = re.split(r'[.!?]+', text)
+        sent_sentiments = []
+        
+        for s in sentences:
+            tokens = re.findall(r'\b\w+\b', s.lower())
+            if len(tokens) == 0: continue
+            
+            p = sum(1 for w in tokens if w in pos_set)
+            n = sum(1 for w in tokens if w in neg_set)
+            # Sentence-level polarity
+            sent_sentiments.append((p - n) / (p + n + 1))
+            
+        if not sent_sentiments:
+            return 0.0, 0.0 # variance, % strongly negative
+            
+        variance = np.var(sent_sentiments)
+        strong_neg_pct = sum(1 for s in sent_sentiments if s < -0.3) / len(sent_sentiments)
+        
+        return variance, strong_neg_pct
+
     def _compute_temporal_features(self, df):
         """Compute Delta and Rolling Momentum features"""
         df = df.sort_values(['asset', 'filing_date'])
@@ -132,35 +162,85 @@ class FeatureEngineering:
         return df
 
     def _compute_sentiment_features(self) -> None:
-        """Main computation orchestration"""
+        """Main compute logic with sentence-level dispersion"""
         if self.data.mapping_df is None or self.data.mapping_df.empty:
-            logger.error("No documents found in mapping_df.")
             return
 
         df = self.data.mapping_df.copy()
-        yearly_pos, yearly_neg = self._build_yearly_dicts()
+        n = len(df)
+        yearly_pos, yearly_neg, yearly_unc = self._build_yearly_dicts()
         
-        # 1. Tokenization & Word Counting
-        tokenized = self._tokenize_transcripts(df)
-        pos, neg, total = self._count_sentiment_words(tokenized, yearly_pos, yearly_neg, df['filing_date'].dt.year)
+        # Pre-allocate for speed
+        results = {
+            "pos": np.zeros(n), "neg": np.zeros(n), "unc": np.zeros(n),
+            "words": np.zeros(n), "var": np.zeros(n), "strong_neg": np.zeros(n)
+        }
+
+        for i in range(n):
+            text = str(df['transcript'].iloc[i]).lower()
+            year = df['filing_date'].iloc[i].year
+            
+            p_s, n_s, u_s = yearly_pos[year], yearly_neg[year], yearly_unc[year]
+            sentences = re.split(r'[.!?]+', text)
+            sentence_scores = []
+            
+            for s in sentences:
+                tokens = re.findall(r'\b\w+\b', s)
+                if not tokens: continue
+                
+                count_p = sum(1 for w in tokens if w in p_s)
+                count_n = sum(1 for w in tokens if w in n_s)
+                
+                results["pos"][i] += count_p
+                results["neg"][i] += count_n
+                results["unc"][i] += sum(1 for w in tokens if w in u_s)
+                results["words"][i] += len(tokens)
+                
+                # Intra-doc dispersion: Sentence Polarity
+                sentence_scores.append((count_p - count_n) / (len(tokens) + 1))
+
+            if sentence_scores:
+                results["var"][i] = np.var(sentence_scores)
+                results["strong_neg"][i] = sum(1 for s in sentence_scores if s < -0.2) / len(sentence_scores)
+
+        # Level Features
+        df["net_sentiment"] = (results["pos"] - results["neg"]) / (results["words"] + 1)
+        df["pos_ratio"] = results["pos"] / (results["words"] + 1)
+        df["neg_ratio"] = results["neg"] / (results["words"] + 1)
+        df["sent_var"], df["strong_neg_pct"] = results["var"], results["strong_neg"]
+
+        # Temporal/Surprise Features
+        df = df.sort_values(['asset', 'filing_date'])
+        groups = df.groupby("asset")["net_sentiment"]
         
-        df["pos_count"], df["neg_count"], df["word_count"] = pos, neg, total
+        df["sentiment_delta"] = df.groupby("asset")["net_sentiment"].diff()
+        
+        roll_m = groups.transform(lambda x: x.rolling(self.q, min_periods=2).mean())
+        roll_s = groups.transform(lambda x: x.rolling(self.q, min_periods=2).std())
+        
+        df["sentiment_surprise"] = df["net_sentiment"] - roll_m
+        df["sentiment_zscore"] = (df["sentiment_surprise"] / roll_s).fillna(0)
 
-        # 2. Score Computation
-        df = self._compute_raw_scores(df)
-        df = self._compute_temporal_features(df)
+        # Interactions
+        fund_df = self.data.get_fundamentals()
+        if fund_df is not None:
+            # Ensure proper alignment with fundamentals
+            df = pd.merge_asof(
+                df.sort_values("filing_date"), 
+                fund_df.sort_values("filing_date"),
+                on="filing_date", by="asset", direction="backward"
+            )
+            df["sent_eps_interaction"] = df["net_sentiment"] * df.get("eps_surprise", 0)
+            df["valuation_sentiment_gap"] = df["net_sentiment"] / (df.get("pe_ratio", 1) + 1)
 
-        # 3. Alignment & Storage
-        logger.info("Aligning features to market grid...")
-        self.positive_count = self._format_df(df, "pos_count")
-        self.negative_count = self._format_df(df, "neg_count")
-        self.word_count = self._format_df(df, "word_count")
-        self.polarity = self._format_df(df, "polarity")
-        self.sentiment_density = self._format_df(df, "sentiment_density")
-        self.pos_polarity_count_q = self._format_df(df, f"pos_polarity_count_{self.q}q")
-        self.polarity_delta = self._format_df(df, "polarity_delta")
+        # Alignment and Saving
+        for feat in self.feature_names:
+            if feat in df.columns:
+                setattr(self, feat, self._format_df(df, feat))
 
         self._save_features_to_s3()
+        logger.info("Feature engineering completed and saved to S3.")
+        
 
     # =========================
     # Public API
