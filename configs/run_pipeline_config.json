@@ -10,20 +10,82 @@
         "data/market/riy_index_constituents.parquet",
         "data/market/russell_returns.parquet",
         "data/transcripts/formatted_unprocessed_transcripts.parquet",
+        "data/transcripts/formatted_preprocessed_transcripts.parquet",
+        "data/others/words_dict.parquet"
+      ],
+      "FILENAMES_NOT_TO_ALIGN": [
+        "data/market/riy_index_constituents.parquet",
+        "data/transcripts/formatted_unprocessed_transcripts.parquet",
+        "data/transcripts/formatted_preprocessed_transcripts.parquet",
         "data/others/words_dict.parquet"
       ],
       "DATES_FILENAME": "data/market/riy_asset_returns.parquet",
       "BENCHMARK_RETURNS_FILENAME": "data/market/russell_returns.parquet",
-      "TRANSCRIPTS_FILENAME": "data/transcripts/formatted_unprocessed_transcripts.parquet"
+      "WHICH_BENCH_COL_TO_KEEP": "Russell 1000",
+      "TRANSCRIPTS_FILENAME": "data/transcripts/formatted_unprocessed_transcripts.parquet",
+      "PREPROCESSED_TRANSCRIPTS_FILENAME": "data/transcripts/formatted_preprocessed_transcripts.parquet",
+      "RF_RETURNS_FILENAME": "data/market/risk_free_returns.parquet"
     }
   },
   "DATA": {
-    "MARKET_DATA_FREQUENCY": "d"
+    "MARKET_DATA_FREQUENCY": "d",
+    "NAN_POLICY": {
+      "risk_free_returns": {"method": "ffill", "limit": 5},
+      "riy_asset_returns": {"method": "none"},
+      "russell_returns": {"method": "ffill", "limit": 5}
+    }
   },
   "FEATURE_ENGINEERING": {
     "LOAD_OR_COMPUTE": "load",
     "ROLLING_WINDOW_QUARTERS": 4,
-    "LIMIT_FFILL_QDATA": 92
+    "LIMIT_FFILL_QDATA": 92,
+    "MERGE_ASOF_TOLERANCE_DAYS": 63
+  },
+  "EMBEDDINGS": {
+    "LOAD_OR_COMPUTE": "load",
+    "S3_CACHE_PREFIX": "data/embeddings",
+    "SENTENCE_TRANSFORMER": {
+      "MODEL_NAME": "all-MiniLM-L6-v2",
+      "CHUNK_SIZE": 256,
+      "BATCH_SIZE": 32,
+      "TEXT_COLUMN": "transcript"
+    },
+    "TFIDF": {
+      "MAX_FEATURES": 200,
+      "NGRAM_RANGE": [1, 2],
+      "TEXT_COLUMN": "transcript_cleaned"
+    }
+  },
+  "FEATURE_SET": {
+    "MODE": ["tfidf", "st"]
+  },
+  "FORECASTING": {
+    "BETA_WINDOW": 252,
+    "HORIZONS": [1, 5],
+    "REFIT_FREQUENCY": "Q",
+    "TRAIN_WINDOW": null,
+    "VAL_WINDOW": 1,
+    "MIN_TRAIN_PERIODS": 8,
+    "MIN_TRAIN_EVENTS": 50,
+    "MIN_VAL_EVENTS": 5,
+    "MODELS": [
+      {
+        "name": "ridge",
+        "class": "Ridge",
+        "init_params": {},
+        "param_grid": [
+          {"alpha": 1.0}
+        ]
+      },
+      {
+        "name": "rf",
+        "class": "RandomForestRegressor",
+        "init_params": {"random_state": 42, "n_jobs": -1},
+        "param_grid": [
+          {"n_estimators": 200, "max_depth": 5}
+        ]
+      }
+    ]
   },
   "BACKTEST": {
     "SIGNAL_FEATURE": "composite",
@@ -34,15 +96,13 @@
     "REBAL_PERIODS": 66,
     "PORTFOLIO_TYPE": "long_only",
     "TRANSACTION_COSTS_BPS": 10,
-    "STRATEGY_NAME": [
-      "positive_count",
-      "negative_count",
-      "word_count",
-      "polarity",
-      "sentiment_density",
-      "pos_polarity_count_q",
-      "polarity_delta"
-    ]
+    "STRATEGY_NAME": "NLP_ALPHA_V1"
+  },
+
+  "CV_RESULTS": {
+    "SAVE_RESULTS": true,
+    "LOAD_OR_COMPUTE": "compute",
+    "S3_PREFIX": "data/cv_results"
   },
 
   "OUTPUTS": {
