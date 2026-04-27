@@ -11,6 +11,7 @@ from scipy.stats import entropy
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
 from nlp_quant_strat.utils.utils import S3Utils
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class FeatureEngineering:
     # ***----------------------***
     # ***-- Helper functions --***
     # ***----------------------***
-    
+
     def _build_yearly_dicts(self):
         """Build yearly sentiment dictionaries (Loughran-McDonald logic)"""
         logger.info("Building yearly sentiment dictionaries...")
@@ -73,15 +74,19 @@ class FeatureEngineering:
         """Format wide-type dataframe and align to asset returns"""
         df_formatted = df.pivot_table(columns="asset", index="filing_date", values=values_col)
         asset_returns = self.data.get_asset_returns()
-        
+
+        # Realignment on asset universe
         df_formatted = df_formatted.reindex(columns=asset_returns.columns)
 
+        # Merge_asof pour aligner les dates de publication sur les dates de marché
+        tolerance_days = getattr(self.config, 'merge_asof_tolerance_days', 63)
         df_formatted_aligned = pd.merge_asof(
-            asset_returns.reset_index()[['index']], 
+            asset_returns.reset_index()[['index']],
             df_formatted.sort_index().reset_index(),
             left_on="index",
             right_on="filing_date",
-            direction="backward"
+            direction="backward",
+            tolerance=pd.Timedelta(days=tolerance_days),
         ).set_index("index")
         
         if "filing_date" in df_formatted_aligned.columns:
@@ -94,7 +99,7 @@ class FeatureEngineering:
     # ***----------------------***
     # ***-- Feature Compute ---***
     # ***----------------------***
-
+    @staticmethod
     def _tokenize_transcripts(self, df):
         """Standard regex tokenization (Industry standard for LM Dict)"""
         logger.info("Tokenizing transcripts...")
