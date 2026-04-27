@@ -37,6 +37,7 @@ from importlib import import_module
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
@@ -313,14 +314,15 @@ class EarningsWalkForwardCV:
             len(test_periods), len(self.models), horizons, len(data),
         )
 
-        period_results: List[Tuple[List[pd.DataFrame], List[Dict[str, Any]]]] = Parallel(
-            n_jobs=self.n_jobs, prefer="threads",
-        )(
+        _gen = Parallel(n_jobs=self.n_jobs, prefer="threads", return_as="generator_unordered")(
             delayed(self._run_period)(
                 data, date_periods, filing_dates, feat_cols, target_cols,
                 horizons, test_period, i, len(test_periods), buffer,
             )
             for i, test_period in enumerate(test_periods)
+        )
+        period_results: List[Tuple[List[pd.DataFrame], List[Dict[str, Any]]]] = list(
+            tqdm(_gen, total=len(test_periods), desc=f"CV [{mode or 'all'}]", unit="period", leave=True)
         )
 
         pred_chunks       = [c for chunks, _ in period_results for c in chunks]

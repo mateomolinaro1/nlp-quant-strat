@@ -14,11 +14,13 @@ Sections are added incrementally as new modules are implemented:
 import dataclasses
 import logging
 import sys
+import time
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -35,6 +37,7 @@ logger = logging.getLogger("debug_forecasting")
 logger.info("=" * 60)
 logger.info("STEP 0 — Data loading")
 logger.info("=" * 60)
+_t0 = time.time()
 
 from nlp_quant_strat.utils.config import Config
 from nlp_quant_strat.data.data_manager import DataManager
@@ -77,7 +80,7 @@ mapping_assets_in_returns = mapping_df["asset"].isin(asset_returns.columns)
 logger.info("mapping_df assets in asset_returns columns: %.1f%%",
             mapping_assets_in_returns.mean() * 100)
 
-logger.info("STEP 0 — OK\n")
+logger.info("STEP 0 — OK  (%.1fs)\n", time.time() - _t0)
 
 # =============================================================================
 # [STEP 1] TargetBuilder
@@ -85,6 +88,7 @@ logger.info("STEP 0 — OK\n")
 logger.info("=" * 60)
 logger.info("STEP 1 — TargetBuilder")
 logger.info("=" * 60)
+_t1 = time.time()
 
 from nlp_quant_strat.forecasting.targets import TargetBuilder
 
@@ -133,7 +137,7 @@ logger.info("Duplicate (filing_date, asset) pairs: %d — OK", n_dupes)
 # --- Quick preview ---
 logger.info("\nTargets sample (5 rows):\n%s", targets.dropna().head(5).to_string())
 
-logger.info("STEP 1 — OK\n")
+logger.info("STEP 1 — OK  (%.1fs)\n", time.time() - _t1)
 
 # =============================================================================
 # [STEP 2] EmbeddingBuilder
@@ -141,6 +145,7 @@ logger.info("STEP 1 — OK\n")
 logger.info("=" * 60)
 logger.info("STEP 2 — EmbeddingBuilder")
 logger.info("=" * 60)
+_t2 = time.time()
 
 from nlp_quant_strat.forecasting.embeddings import SentenceTransformerBuilder, TFIDFBuilder
 
@@ -174,11 +179,8 @@ st_embeddings = data_manager.aws.s3.load(key="data/embeddings/st_788990f70d.parq
 # n_emb_feats = st_embeddings.shape[1] - 2
 # logger.info("st_embeddings    : %s | %d dims (emb_0 .. emb_%d)",
 #             st_embeddings.shape, n_emb_feats, n_emb_feats - 1)
-#
-# logger.info("STEP 2 — OK\n")
-#
-# data_manager.release_transcripts()
-# logger.info("Transcript DataFrames released from memory.")
+
+logger.info("STEP 2 — OK  (%.1fs)\n", time.time() - _t2)
 
 # =============================================================================
 # [STEP 3 + 4] FeatureSet → EarningsWalkForwardCV  (iterated over modes)
@@ -313,10 +315,15 @@ def _run_mode(mode: str):
 
 logger.info("Running %d mode(s) in parallel (n_jobs=%d): %s",
             len(config.feature_set_mode), len(config.feature_set_mode), config.feature_set_mode)
+_t34 = time.time()
 
-_mode_results = Parallel(n_jobs=len(config.feature_set_mode), prefer="threads")(
+_mode_gen = Parallel(n_jobs=len(config.feature_set_mode), prefer="threads", return_as="generator_unordered")(
     delayed(_run_mode)(mode) for mode in config.feature_set_mode
 )
+_mode_results = list(
+    tqdm(_mode_gen, total=len(config.feature_set_mode), desc="Feature modes", unit="mode", leave=True)
+)
+logger.info("STEP 3+4 — all modes done  (%.1fs)\n", time.time() - _t34)
 
 all_predictions       = [r[0] for r in _mode_results]
 all_selection_history = [r[1] for r in _mode_results]
