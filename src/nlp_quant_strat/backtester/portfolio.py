@@ -4,6 +4,9 @@ import pandas as pd
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import Union
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CreatePortfolio:
     """Class to compute portfolio level returns given assets' weights and returns"""
@@ -322,7 +325,7 @@ class EqualWeightingScheme(WeightingScheme):
 
                 # Setting weights to nan at rows where all signals are missing
                 weights.loc[~mask_valid, :] = np.nan  # Optional as in the creation of weights, default data set to 0
-                print("For some dates, there is no signals. Weights set to nan by default.")
+                logger.info("For some dates, there is no signals. Weights set to nan by default.")
 
         elif self.portfolio_type == "short_only":
             # Check that there is at least one negative signal at each date
@@ -336,7 +339,7 @@ class EqualWeightingScheme(WeightingScheme):
 
                 # Setting weights to 0 at rows where all signals are missing
                 weights.loc[~mask_valid, :] = np.nan  # Optional as in the creation of weights, default data set to 0
-                print("For some dates, there is no signals. Weights set to nan by default.")
+                logger.info("For some dates, there is no signals. Weights set to nan by default.")
 
         elif self.portfolio_type == "long_short":
             # Check that there is at least one positive and one negative signal at each date

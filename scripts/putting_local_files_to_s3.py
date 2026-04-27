@@ -5,9 +5,17 @@ from nlp_quant_strat.utils import utils
 import pandas as pd
 from better_aws import AWS
 from dotenv import load_dotenv
+import logging
+import sys
 load_dotenv()
 config = Config()
 
+# Init logger
+logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 pd.set_option("display.max_colwidth", 100000)
 
 # Load data
@@ -36,7 +44,7 @@ aws.s3.config(
 # aws.s3.upload(src=df, key="data/FRED-MD-2026-02.parquet")
 utils.S3Utils.upload_df_with_index(df=data.data, bucket=config.bucket_name, path="data/transcripts/formatted_unprocessed_transcripts.parquet")
 
-utils.S3Utils.upload_df_with_index(df=data.data, bucket=config.bucket_name, path="data/transcripts/preprocessed_transcripts.parquet")
+utils.S3Utils.upload_df_with_index(df=preprocessed_data, bucket=config.bucket_name, path="data/transcripts/formatted_preprocessed_transcripts.parquet")
 
 df = pd.read_feather(config.ROOT_DIR / "data" / "market" / "RIY Index constituents.feather")
 df_asset_ret = pd.read_feather(config.ROOT_DIR / "data" / "market" / "RIY Index returns.feather")
