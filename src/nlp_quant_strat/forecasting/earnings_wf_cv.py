@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from joblib import Parallel, delayed
+
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
@@ -197,6 +199,14 @@ class EarningsWalkForwardCV:
     s3_prefix : str
         S3 key prefix under which result parquets are stored.
         Default ``"data/cv_results"``.
+    n_jobs : int
+        Number of parallel workers for the test-period loop.
+        ``-1`` uses all available CPU cores (default).
+        ``1`` disables parallelism (useful for debugging or when models
+        themselves use internal threading — e.g. RandomForestRegressor with
+        n_jobs=-1 — to avoid thread oversubscription).
+        Uses ``joblib`` with ``prefer="threads"`` so the event-panel DataFrame
+        is shared across workers without copying.
     """
 
     models: List[Tuple[str, Any, Sequence[Dict[str, Any]]]]
@@ -212,6 +222,7 @@ class EarningsWalkForwardCV:
     load_or_compute: str = "compute"
     save_results: bool = False
     s3_prefix: str = "data/cv_results"
+    n_jobs: int = -1
 
     def __post_init__(self) -> None:
         if not self.models:
@@ -302,132 +313,18 @@ class EarningsWalkForwardCV:
             len(test_periods), len(self.models), horizons, len(data),
         )
 
-        pred_chunks: List[pd.DataFrame] = []
-        selection_records: List[Dict[str, Any]] = []
-
-        for i, test_period in enumerate(test_periods):
-            test_mask, val_mask, train_mask = self._split_masks(date_periods, test_period, buffer)
-
-            n_train = int(train_mask.sum())
-            n_val   = int(val_mask.sum())
-            n_test  = int(test_mask.sum())
-
-            if n_test == 0:
-                continue
-
-            logger.info(
-                "Period %s (%d/%d) | train=%d | val=%d | test=%d",
-                test_period, i + 1, len(test_periods), n_train, n_val, n_test,
+        period_results: List[Tuple[List[pd.DataFrame], List[Dict[str, Any]]]] = Parallel(
+            n_jobs=self.n_jobs, prefer="threads",
+        )(
+            delayed(self._run_period)(
+                data, date_periods, filing_dates, feat_cols, target_cols,
+                horizons, test_period, i, len(test_periods), buffer,
             )
+            for i, test_period in enumerate(test_periods)
+        )
 
-            X_train_raw   = data.loc[train_mask, feat_cols].values.astype(float)
-            X_val_raw     = data.loc[val_mask,   feat_cols].values.astype(float)
-            X_test_raw    = data.loc[test_mask,  feat_cols].values.astype(float)
-            test_rows     = data.loc[test_mask, ["filing_date", "asset"]].reset_index(drop=True)
-            train_dates   = filing_dates[train_mask]
-            val_dates     = filing_dates[val_mask]
-
-            for horizon in horizons:
-                t_col = target_cols[horizon]
-
-                y_train_all = data.loc[train_mask, t_col].values
-                y_val_all   = data.loc[val_mask,   t_col].values
-                y_test_vals = data.loc[test_mask,  t_col].values
-
-                valid_train = ~np.isnan(y_train_all)
-                valid_val   = ~np.isnan(y_val_all)
-
-                if valid_train.sum() < self.min_train_events:
-                    logger.debug(
-                        "Period %s | horizon %dd: %d valid train events < min=%d, skipping.",
-                        test_period, horizon, valid_train.sum(), self.min_train_events,
-                    )
-                    continue
-
-                # Scaler for hyperparameter search: fit on train only
-                scaler_search = self.scaler_cls()
-                X_train_s = scaler_search.fit_transform(X_train_raw)
-                X_val_s   = scaler_search.transform(X_val_raw)
-
-                for model_name, estimator, param_grid in self.models:
-                    logger.debug(
-                        "  model=%-6s | horizon=%2dd | grid_size=%d | val_scorable=%s",
-                        model_name, horizon, len(param_grid),
-                        valid_val.sum() >= self.min_val_events,
-                    )
-
-                    # --- Hyperparameter search on validation set ---
-                    best_params: Dict[str, Any] = dict(param_grid[0])
-                    best_score  = -np.inf
-                    can_score   = valid_val.sum() >= self.min_val_events
-
-                    for params in param_grid:
-                        m = clone(estimator).set_params(**params)
-                        m.fit(X_train_s[valid_train], y_train_all[valid_train])
-
-                        if not can_score:
-                            best_params = dict(params)
-                            break
-
-                        y_val_pred = m.predict(X_val_s[valid_val])
-                        score = self.scoring_func(y_val_all[valid_val], y_val_pred)
-
-                        logger.debug(
-                            "    params=%s | val_score=%.4f", params, score if not np.isnan(score) else float("nan"),
-                        )
-
-                        if not np.isnan(score) and score > best_score:
-                            best_score  = score
-                            best_params = dict(params)
-
-                    # --- Final fit on train + val with best params ---
-                    trainval_mask = train_mask | val_mask
-                    X_trainval_raw = data.loc[trainval_mask, feat_cols].values.astype(float)
-                    y_trainval_all = data.loc[trainval_mask, t_col].values
-                    valid_trainval = ~np.isnan(y_trainval_all)
-
-                    if valid_trainval.sum() < self.min_train_events:
-                        continue
-
-                    scaler_final    = self.scaler_cls()
-                    X_trainval_s    = scaler_final.fit_transform(X_trainval_raw)
-                    X_test_s        = scaler_final.transform(X_test_raw)
-
-                    m_final = clone(estimator).set_params(**best_params)
-                    m_final.fit(X_trainval_s[valid_trainval], y_trainval_all[valid_trainval])
-                    y_pred = m_final.predict(X_test_s)
-
-                    logger.debug(
-                        "  → best_params=%s | val_score=%.4f | n_test_preds=%d",
-                        best_params,
-                        float(best_score) if np.isfinite(best_score) else float("nan"),
-                        len(y_pred),
-                    )
-
-                    # --- Store predictions ---
-                    chunk = test_rows.copy()
-                    chunk["period"]  = str(test_period)
-                    chunk["model"]   = model_name
-                    chunk["horizon"] = horizon
-                    chunk["y_pred"]  = y_pred
-                    chunk["y_true"]  = y_test_vals
-                    pred_chunks.append(chunk)
-
-                    # --- Store selection metadata ---
-                    selection_records.append({
-                        "period":       str(test_period),
-                        "model":        model_name,
-                        "horizon":      horizon,
-                        "train_start":  train_dates.min() if n_train > 0 else pd.NaT,
-                        "train_end":    train_dates.max() if n_train > 0 else pd.NaT,
-                        "val_start":    val_dates.min()   if n_val   > 0 else pd.NaT,
-                        "val_end":      val_dates.max()   if n_val   > 0 else pd.NaT,
-                        "n_train":      int(valid_train.sum()),
-                        "n_val":        int(valid_val.sum()),
-                        "n_test":       n_test,
-                        "best_params":  best_params,
-                        "val_score":    float(best_score) if np.isfinite(best_score) else np.nan,
-                    })
+        pred_chunks       = [c for chunks, _ in period_results for c in chunks]
+        selection_records = [r for _, recs  in period_results for r in recs]
 
         predictions = (
             pd.concat(pred_chunks, ignore_index=True)
@@ -463,6 +360,159 @@ class EarningsWalkForwardCV:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _run_period(
+        self,
+        data: pd.DataFrame,
+        date_periods: pd.Series,
+        filing_dates: pd.Series,
+        feat_cols: List[str],
+        target_cols: Dict[int, str],
+        horizons: List[int],
+        test_period: pd.Period,
+        period_idx: int,
+        n_periods: int,
+        buffer: int,
+    ) -> Tuple[List[pd.DataFrame], List[Dict[str, Any]]]:
+        """
+        Process one test period: scale, grid-search, refit, predict.
+
+        Called by ``run()`` via ``joblib.Parallel``.  All array operations are
+        numpy/sklearn and release the GIL, so ``prefer="threads"`` is safe and
+        avoids copying the shared ``data`` DataFrame.
+
+        Returns
+        -------
+        (pred_chunks, selection_records)
+            Lists to be concatenated by the caller across all periods.
+        """
+        test_mask, val_mask, train_mask = self._split_masks(date_periods, test_period, buffer)
+
+        n_train = int(train_mask.sum())
+        n_val   = int(val_mask.sum())
+        n_test  = int(test_mask.sum())
+
+        if n_test == 0:
+            return [], []
+
+        logger.info(
+            "Period %s (%d/%d) | train=%d | val=%d | test=%d",
+            test_period, period_idx + 1, n_periods, n_train, n_val, n_test,
+        )
+
+        X_train_raw   = data.loc[train_mask,   feat_cols].values.astype(float)
+        X_val_raw     = data.loc[val_mask,     feat_cols].values.astype(float)
+        X_test_raw    = data.loc[test_mask,    feat_cols].values.astype(float)
+        test_rows     = data.loc[test_mask, ["filing_date", "asset"]].reset_index(drop=True)
+        train_dates   = filing_dates[train_mask]
+        val_dates     = filing_dates[val_mask]
+
+        # Period-level scalers (X is horizon- and model-independent)
+        scaler_search  = self.scaler_cls()
+        X_train_s      = scaler_search.fit_transform(X_train_raw)
+        X_val_s        = scaler_search.transform(X_val_raw)
+
+        trainval_mask  = train_mask | val_mask
+        X_trainval_raw = data.loc[trainval_mask, feat_cols].values.astype(float)
+        scaler_final   = self.scaler_cls()
+        X_trainval_s   = scaler_final.fit_transform(X_trainval_raw)
+        X_test_s       = scaler_final.transform(X_test_raw)
+
+        pred_chunks: List[pd.DataFrame] = []
+        selection_records: List[Dict[str, Any]] = []
+
+        for horizon in horizons:
+            t_col = target_cols[horizon]
+
+            y_train_all    = data.loc[train_mask,    t_col].values
+            y_val_all      = data.loc[val_mask,      t_col].values
+            y_test_vals    = data.loc[test_mask,     t_col].values
+            y_trainval_all = data.loc[trainval_mask, t_col].values
+
+            valid_train    = ~np.isnan(y_train_all)
+            valid_val      = ~np.isnan(y_val_all)
+            valid_trainval = ~np.isnan(y_trainval_all)
+
+            if valid_train.sum() < self.min_train_events:
+                logger.debug(
+                    "Period %s | horizon %dd: %d valid train events < min=%d, skipping.",
+                    test_period, horizon, valid_train.sum(), self.min_train_events,
+                )
+                continue
+
+            if valid_trainval.sum() < self.min_train_events:
+                continue
+
+            for model_name, estimator, param_grid in self.models:
+                logger.debug(
+                    "  model=%-6s | horizon=%2dd | grid_size=%d | val_scorable=%s",
+                    model_name, horizon, len(param_grid),
+                    valid_val.sum() >= self.min_val_events,
+                )
+
+                # --- Hyperparameter search on validation set ---
+                best_params: Dict[str, Any] = dict(param_grid[0])
+                best_score  = -np.inf
+                can_score   = valid_val.sum() >= self.min_val_events
+
+                for params in param_grid:
+                    m = clone(estimator).set_params(**params)
+                    m.fit(X_train_s[valid_train], y_train_all[valid_train])
+
+                    if not can_score:
+                        best_params = dict(params)
+                        break
+
+                    y_val_pred = m.predict(X_val_s[valid_val])
+                    score = self.scoring_func(y_val_all[valid_val], y_val_pred)
+
+                    logger.debug(
+                        "    params=%s | val_score=%.4f",
+                        params, score if not np.isnan(score) else float("nan"),
+                    )
+
+                    if not np.isnan(score) and score > best_score:
+                        best_score  = score
+                        best_params = dict(params)
+
+                # --- Final fit on train + val with best params ---
+                m_final = clone(estimator).set_params(**best_params)
+                m_final.fit(X_trainval_s[valid_trainval], y_trainval_all[valid_trainval])
+                y_pred = m_final.predict(X_test_s)
+
+                logger.debug(
+                    "  → best_params=%s | val_score=%.4f | n_test_preds=%d",
+                    best_params,
+                    float(best_score) if np.isfinite(best_score) else float("nan"),
+                    len(y_pred),
+                )
+
+                # --- Store predictions ---
+                chunk = test_rows.copy()
+                chunk["period"]  = str(test_period)
+                chunk["model"]   = model_name
+                chunk["horizon"] = horizon
+                chunk["y_pred"]  = y_pred
+                chunk["y_true"]  = y_test_vals
+                pred_chunks.append(chunk)
+
+                # --- Store selection metadata ---
+                selection_records.append({
+                    "period":       str(test_period),
+                    "model":        model_name,
+                    "horizon":      horizon,
+                    "train_start":  train_dates.min() if n_train > 0 else pd.NaT,
+                    "train_end":    train_dates.max() if n_train > 0 else pd.NaT,
+                    "val_start":    val_dates.min()   if n_val   > 0 else pd.NaT,
+                    "val_end":      val_dates.max()   if n_val   > 0 else pd.NaT,
+                    "n_train":      int(valid_train.sum()),
+                    "n_val":        int(valid_val.sum()),
+                    "n_test":       n_test,
+                    "best_params":  best_params,
+                    "val_score":    float(best_score) if np.isfinite(best_score) else np.nan,
+                })
+
+        return pred_chunks, selection_records
 
     def _cache_key_prefix(self, horizons: List[int], mode: Optional[str]) -> str:
         """

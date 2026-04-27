@@ -18,10 +18,14 @@ class FeatureEngineering:
         self.config = config
 
         # Features mapping to ease loading/saving
+        # self.feature_names = [
+        #     "pos_ratio", "neg_ratio", "net_sentiment", "sentiment_surprise",
+        #     "sentiment_zscore", "sentiment_delta", "sent_var",
+        #     "strong_neg_pct", "sent_eps_interaction", "valuation_sentiment_gap"
+        # ]
         self.feature_names = [
-            "pos_ratio", "neg_ratio", "net_sentiment", "sentiment_surprise",
-            "sentiment_zscore", "sentiment_delta", "sent_var",
-            "strong_neg_pct", "sent_eps_interaction", "valuation_sentiment_gap"
+            "negative_count", "positive_count", "polarity", "polarity_delta", "pos_polarity_count_q",
+            "sentiment_density", "word_count"
         ]
 
         # Initialisation des attributes à None

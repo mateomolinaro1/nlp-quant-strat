@@ -284,3 +284,18 @@ class DataManager:
             if getattr(self, attr, None) is not None:
                 setattr(self, attr, None)
                 logger.info("Released '%s' from memory.", attr)
+
+    def get_fundamentals(self) -> pd.DataFrame | None:
+        """Retrieves fundamentals based on the FUNDAMENTALS_FILENAME in config."""
+        # This gets 'fundamentals' from 'data/market/fundamentals.parquet'
+        attr_name = Path(self.config.fundamentals_filename).stem
+
+        if hasattr(self, attr_name):
+            df = getattr(self, attr_name)
+            if df is not None:
+                # Standardize date for merge_asof
+                df['filing_date'] = pd.to_datetime(df['filing_date'])
+                return df
+
+        logger.warning("Fundamentals data not found in DataManager attributes.")
+        return None

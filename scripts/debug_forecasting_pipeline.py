@@ -11,12 +11,14 @@ Sections are added incrementally as new modules are implemented:
   [STEP 5] ExperimentRunner (experiment.py)        <- TODO
   [STEP 6] ICAnalyser (ic_analysis.py)             <- TODO
 """
+import dataclasses
 import logging
 import sys
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from joblib import Parallel, delayed
 
 load_dotenv()
 
@@ -181,7 +183,7 @@ st_embeddings = data_manager.aws.s3.load(key="data/embeddings/st_788990f70d.parq
 # =============================================================================
 # [STEP 3 + 4] FeatureSet → EarningsWalkForwardCV  (iterated over modes)
 # =============================================================================
-from nlp_quant_strat.forecasting.feature_set import FeatureSet, FeatureMode
+from nlp_quant_strat.forecasting.feature_set import FeatureSet
 from nlp_quant_strat.data.feature_engineering import FeatureEngineering
 from nlp_quant_strat.forecasting.earnings_wf_cv import (
     EarningsWalkForwardCV, EarningsWalkForwardResult, build_models_from_config,
@@ -224,13 +226,21 @@ cv = EarningsWalkForwardCV(
     load_or_compute=config.cv_results_load_or_compute,
     save_results=config.cv_results_save,
     s3_prefix=config.cv_results_s3_prefix,
+    n_jobs=config.cv_results_n_jobs,
 )
 
-all_predictions      = []
-all_selection_history = []
-all_oos_metrics      = []
+def _run_mode(mode: str):
+    """
+    Run STEP 3 (FeatureSet) + STEP 4 (EarningsWalkForwardCV) for one feature mode.
 
-for mode in config.feature_set_mode:
+    Called in parallel by joblib.  All inputs (targets, feature_eng, embeddings,
+    cv, config, data_manager) are captured from the enclosing scope and treated as
+    read-only — FeatureSet.build() produces new DataFrames, cv clones estimators
+    internally, so no shared mutable state exists between workers.
+
+    Inner period-parallelism is disabled (n_jobs=1) to avoid oversubscribing the
+    CPU when multiple modes run simultaneously.
+    """
     # ------------------------------------------------------------------
     # STEP 3 — FeatureSet
     # ------------------------------------------------------------------
@@ -251,17 +261,17 @@ for mode in config.feature_set_mode:
         f"[mode={mode}] X and y row counts differ: {X.shape[0]} vs {y.shape[0]}"
     assert "filing_date" in X.columns and "asset" in X.columns, \
         f"[mode={mode}] X missing sentinel columns"
-    target_cols = [c for c in y.columns if c.startswith("idio_")]
-    assert len(target_cols) == len(config.forecasting_horizons), \
-        f"[mode={mode}] Expected {len(config.forecasting_horizons)} target cols, got {len(target_cols)}"
+    _target_cols = [c for c in y.columns if c.startswith("idio_")]
+    assert len(_target_cols) == len(config.forecasting_horizons), \
+        f"[mode={mode}] Expected {len(config.forecasting_horizons)} target cols, got {len(_target_cols)}"
 
     logger.info("X shape              : %s", X.shape)
     logger.info("y shape              : %s", y.shape)
     logger.info("X columns (first 10) : %s", list(X.columns[:10]))
     logger.info("y columns            : %s", list(y.columns))
 
-    feat_cols = [c for c in X.columns if c not in {"filing_date", "asset"}]
-    n_nan = X[feat_cols].isna().sum().sum()
+    _feat_cols = [c for c in X.columns if c not in {"filing_date", "asset"}]
+    n_nan = X[_feat_cols].isna().sum().sum()
     assert n_nan == 0, f"[mode={mode}] X has {n_nan} NaN values after FeatureSet.build()"
     logger.info("NaN in X features: %d — OK", n_nan)
 
@@ -269,9 +279,6 @@ for mode in config.feature_set_mode:
     y_keys = y[["filing_date", "asset"]].apply(tuple, axis=1)
     assert (x_keys == y_keys).all(), f"[mode={mode}] X and y not row-aligned"
     logger.info("X/y row alignment — OK")
-
-    logger.info("\nX sample (3 rows, first 6 cols):\n%s", X.iloc[:3, :6].to_string())
-    logger.info("\ny sample (3 rows):\n%s", y.head(3).to_string())
     logger.info("STEP 3 — OK  (mode=%s)\n", mode)
 
     # ------------------------------------------------------------------
@@ -281,7 +288,10 @@ for mode in config.feature_set_mode:
     logger.info("STEP 4 — EarningsWalkForwardCV  (mode=%s)", mode)
     logger.info("=" * 60)
 
-    mode_result: EarningsWalkForwardResult = cv.run(
+    # Disable inner period parallelism: with n_modes workers already running,
+    # letting each also spawn n_jobs=-1 threads would oversubscribe the CPU.
+    cv_mode = dataclasses.replace(cv, n_jobs=1)
+    mode_result: EarningsWalkForwardResult = cv_mode.run(
         x=X,
         y=y,
         horizons=config.forecasting_horizons,
@@ -289,19 +299,28 @@ for mode in config.feature_set_mode:
         aws=data_manager.aws,
     )
 
-    # Tag every output row with the current mode for later comparison
-    mode_result.predictions["mode"]      = mode
+    mode_result.predictions["mode"]       = mode
     mode_result.selection_history["mode"] = mode
     if not mode_result.oos_metrics.empty:
-        mode_result.oos_metrics["mode"]  = mode
-
-    all_predictions.append(mode_result.predictions)
-    all_selection_history.append(mode_result.selection_history)
-    all_oos_metrics.append(mode_result.oos_metrics)
+        mode_result.oos_metrics["mode"]   = mode
 
     logger.info("predictions       : %s", mode_result.predictions.shape)
     logger.info("selection_history : %s", mode_result.selection_history.shape)
     logger.info("STEP 4 — OK  (mode=%s)\n", mode)
+
+    return mode_result.predictions, mode_result.selection_history, mode_result.oos_metrics
+
+
+logger.info("Running %d mode(s) in parallel (n_jobs=%d): %s",
+            len(config.feature_set_mode), len(config.feature_set_mode), config.feature_set_mode)
+
+_mode_results = Parallel(n_jobs=len(config.feature_set_mode), prefer="threads")(
+    delayed(_run_mode)(mode) for mode in config.feature_set_mode
+)
+
+all_predictions       = [r[0] for r in _mode_results]
+all_selection_history = [r[1] for r in _mode_results]
+all_oos_metrics       = [r[2] for r in _mode_results]
 
 # --- Combine results across all modes ---
 result = EarningsWalkForwardResult(

@@ -57,11 +57,11 @@
     }
   },
   "FEATURE_SET": {
-    "MODE": ["tfidf", "st"]
+    "MODE": ["tfidf", "st", "sentiment", "tfidf_sentiment", "st_sentiment", "all"]
   },
   "FORECASTING": {
     "BETA_WINDOW": 252,
-    "HORIZONS": [1, 5],
+    "HORIZONS": [1, 2, 3, 4, 5, 21, 42, 63],
     "REFIT_FREQUENCY": "Q",
     "TRAIN_WINDOW": null,
     "VAL_WINDOW": 1,
@@ -74,6 +74,18 @@
         "class": "Ridge",
         "init_params": {},
         "param_grid": [
+          {"alpha": 0.01},
+          {"alpha": 0.1},
+          {"alpha": 1.0}
+        ]
+      },
+      {
+        "name": "lasso",
+        "class": "Lasso",
+        "init_params": {"max_iter": 5000},
+        "param_grid": [
+          {"alpha": 0.01},
+          {"alpha": 0.1},
           {"alpha": 1.0}
         ]
       },
@@ -82,11 +94,24 @@
         "class": "RandomForestRegressor",
         "init_params": {"random_state": 42, "n_jobs": -1},
         "param_grid": [
+          {"n_estimators": 100, "max_depth": 3},
+          {"n_estimators": 100, "max_depth": 5},
           {"n_estimators": 200, "max_depth": 5}
+        ]
+      },
+      {
+        "name": "gbr",
+        "class": "GradientBoostingRegressor",
+        "init_params": {"random_state": 42},
+        "param_grid": [
+          {"n_estimators": 100, "max_depth": 3, "learning_rate": 0.05},
+          {"n_estimators": 100, "max_depth": 3, "learning_rate": 0.1},
+          {"n_estimators": 200, "max_depth": 3, "learning_rate": 0.05}
         ]
       }
     ]
   },
+
   "BACKTEST": {
     "SIGNAL_FEATURE": "composite",
     "SENTIMENT_ROLLING_WINDOW": 4,
@@ -102,7 +127,8 @@
   "CV_RESULTS": {
     "SAVE_RESULTS": true,
     "LOAD_OR_COMPUTE": "compute",
-    "S3_PREFIX": "data/cv_results"
+    "S3_PREFIX": "data/cv_results",
+    "N_JOBS": -1
   },
 
   "OUTPUTS": {
