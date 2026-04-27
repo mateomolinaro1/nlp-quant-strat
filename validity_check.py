@@ -6,11 +6,27 @@ import pandas as pd
 # 1. Setup
 config = Config()
 dm = DataManager(config)
+
+# 2. Initialize the AWS connection
+# This sets up dm.aws so you can use dm.aws.s3
+dm._init_s3() 
+
+
+# 2. DO NOT LOAD EVERYTHING in DataManager
+# Manually load only what is needed for the check
+
 dm.load_data()
+# (We only load the dates and tickers of 500 rows to create a 'fake' small mapping)
+
+dm.mapping_df.rename(columns={'ticker_api': 'ticker'}, inplace=True)
+dm.mapping_df['asset'] = dm.mapping_df['ticker'] # Dummy asset names for testing
+
 fe = FeatureEngineering(dm, config)
 
-# 2. Trigger computation (Local only, don't save to S3 yet if you want to test)
+# 3. Use a VERY small subset for the compute
 fe._compute_sentiment_features()
+
+print("If you see this, the RAM did not explode!")
 
 print("\n" + "="*30)
 print("     SANITY CHECK REPORT")

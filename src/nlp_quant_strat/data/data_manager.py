@@ -41,15 +41,19 @@ class DataManager:
             name = Path(filename).stem
             logger.info(f"Loading {filename}...")
             
+            # 1. Load the file normally (no 'columns' arg to avoid TypeError)
             obj = self.aws.s3.load(key=filename)
             
-            # --- SAVING RAM HERE ---
+            # 2. If it's the transcript file, strip the heavy text IMMEDIATELY
             if name == transcript_attr:
-                logger.info(f"We delete text columns to save RAM")
-                # We keep only the mapping columns (date, ticker, asset)
-                columns_to_keep = [c for c in obj.columns if c != 'transcript']
-                obj = obj[columns_to_keep]
-            # --------------------------
+                logger.info("Transcript file detected. Stripping text to save RAM...")
+                if 'transcript' in obj.columns:
+                    # We drop the heavy text column right here
+                    obj.drop(columns=['transcript'], inplace=True)
+                
+                # Force Python to release the memory of the dropped text
+                import gc
+                gc.collect()
 
             setattr(self, name, obj)
 
