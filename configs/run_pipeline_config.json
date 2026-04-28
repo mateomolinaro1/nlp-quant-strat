@@ -57,7 +57,7 @@
     }
   },
   "FEATURE_SET": {
-    "MODE": ["st"]
+    "MODE": ["sentiment"]
   },
   "FORECASTING": {
     "BETA_WINDOW": 252,
@@ -91,7 +91,7 @@
 
   "CV_RESULTS": {
     "SAVE_RESULTS": true,
-    "LOAD_OR_COMPUTE": "compute",
+    "LOAD_OR_COMPUTE": "load",
     "S3_PREFIX": "data/cv_results",
     "N_JOBS": -1
   },

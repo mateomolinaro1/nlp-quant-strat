@@ -1,9 +1,15 @@
 """
 This module implements the feature engineering logic for the NLP quant strategy.
 """
+
 import numpy as np
 import pandas as pd
+import re
 import logging
+import gc
+import multiprocessing
+from joblib import Parallel, delayed
+from tqdm import tqdm
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
 from nlp_quant_strat.utils.utils import S3Utils
@@ -11,30 +17,52 @@ import re
 
 logger = logging.getLogger(__name__)
 
-class FeatureEngineering:
+# Static worker function for parallel processing (Must be outside the class)
+def _process_single_doc(text, year, yearly_pos, yearly_neg, yearly_unc):
+    p_s, n_s, u_s = yearly_pos[year], yearly_neg[year], yearly_unc[year]
+    sentences = re.split(r'[.!?]+', str(text).lower())
+    
+    doc_p, doc_n, doc_u, doc_w = 0, 0, 0, 0
+    scores = []
+    
+    for s in sentences:
+        tokens = re.findall(r'\b\w+\b', s)
+        if not tokens: continue
+        
+        cp = sum(1 for w in tokens if w in p_s)
+        cn = sum(1 for w in tokens if w in n_s)
+        cu = sum(1 for w in tokens if u_s and w in u_s)
+        cw = len(tokens)
+        
+        doc_p += cp; doc_n += cn; doc_u += cu; doc_w += cw
+        scores.append((cp - cn) / (cw + 1))
 
+    var = np.var(scores) if scores else 0.0
+    tox = sum(1 for s in scores if s < -0.2) / len(scores) if scores else 0.0
+    return [doc_p, doc_n, doc_u, doc_w, var, tox]
+
+class FeatureEngineering:
     def __init__(self, data: DataManager, config: Config):
         self.data = data
         self.config = config
-
-        # Features mapping to ease loading/saving
-        # self.feature_names = [
-        #     "pos_ratio", "neg_ratio", "net_sentiment", "sentiment_surprise",
-        #     "sentiment_zscore", "sentiment_delta", "sent_var",
-        #     "strong_neg_pct", "sent_eps_interaction", "valuation_sentiment_gap"
-        # ]
+        
+        # Liste complète pour satisfaire FeatureSet.build(mode="sentiment")
         self.feature_names = [
-            "negative_count", "positive_count", "polarity", "polarity_delta", "pos_polarity_count_q",
-            "sentiment_density", "word_count"
+            # Features "Legacy" présentes sur S3 et attendues par le pipeline
+            "positive_count", "negative_count", "word_count", 
+            "sentiment_density", "polarity", "polarity_delta", "pos_polarity_count_q",
+            
+            # Features "Alpha" que nous avons développées
+            "pos_ratio", "neg_ratio", "net_sentiment", "sentiment_surprise", 
+            "sentiment_zscore", "sentiment_delta", "sent_var", 
+            "toxic_density", "sent_vol_interaction", "unc_ratio"
         ]
-
-        # Initialisation des attributes à None
+        
         for feat in self.feature_names:
             setattr(self, feat, None)
 
-        # rolling window size for momentum feature (number of past quarters to look at)
         self.q = getattr(self.config, 'rolling_window_quarters', 4)
-
+        
     # ***----------------------***
     # ***-- Helper functions --***
     # ***----------------------***
@@ -178,93 +206,82 @@ class FeatureEngineering:
         return df
 
     def _compute_sentiment_features(self) -> None:
-        """Main compute logic with sentence-level dispersion"""
-        if self.data.mapping_df is None or self.data.mapping_df.empty:
-            return
+        if self.data.mapping_df is None: return
 
-        df = self.data.mapping_df.copy()
-        n = len(df)
+        # 1. Load Transcripts (Remove the 'columns' argument here)
+        logger.info("Loading full transcripts for processing...")
+        t_key = getattr(self.config, 'TRANSCRIPTS_FILENAME', 'data/transcripts/formatted_unprocessed_transcripts.parquet')
+        
+        # FIX: No 'columns' argument allowed by better_aws
+        df_full = self.data.aws.s3.load(key=t_key)
+        
+        # IMMEDIATELY select only the columns we need to save RAM
+        # This keeps 'transcript', 'ticker_api', and 'filing_date'
+        needed_cols = ['ticker_api', 'filing_date', 'transcript']
+        df_full = df_full[needed_cols]
+        
+        # Standardize and Merge
+        df_full.rename(columns={'ticker_api': 'ticker'}, inplace=True)
+        df_full['filing_date'] = pd.to_datetime(df_full['filing_date'])
+        
+        df = pd.merge(self.data.mapping_df[['ticker', 'filing_date', 'asset']], df_full, on=['ticker', 'filing_date'], how='inner')
+        
+        # PURGE df_full immediately to free up the 2x RAM spike
+        del df_full 
+        import gc
+        gc.collect()
+
+        # 2. Setup Dictionaries
         yearly_pos, yearly_neg, yearly_unc = self._build_yearly_dicts()
 
-        # Pre-allocate for speed
-        results = {
-            "pos": np.zeros(n), "neg": np.zeros(n), "unc": np.zeros(n),
-            "words": np.zeros(n), "var": np.zeros(n), "strong_neg": np.zeros(n)
-        }
+        # 3. Parallel Processing (The "Turbo" Part)
+        logger.info(f"Processing {len(df)} documents on multiple cores...")
+        n_cores = multiprocessing.cpu_count() - 1
+        
+        results = Parallel(n_jobs=n_cores)(
+            delayed(_process_single_doc)(
+                df['transcript'].iloc[i], 
+                df['filing_date'].iloc[i].year,
+                yearly_pos, yearly_neg, yearly_unc
+            ) for i in tqdm(range(len(df)), desc="NLP Mining")
+        )
 
-        for i in range(n):
-            text = str(df['transcript'].iloc[i]).lower()
-            year = df['filing_date'].iloc[i].year
+        # 4. Map Results and Purge Text
+        res_arr = np.array(results, dtype='float32')
+        df["net_sentiment"] = (res_arr[:, 0] - res_arr[:, 1]) / (res_arr[:, 3] + 1)
+        df["pos_ratio"] = res_arr[:, 0] / (res_arr[:, 3] + 1)
+        df["neg_ratio"] = res_arr[:, 1] / (res_arr[:, 3] + 1)
+        df["unc_ratio"] = res_arr[:, 2] / (res_arr[:, 3] + 1)
+        df["sent_var"], df["toxic_density"] = res_arr[:, 4], res_arr[:, 5]
+        
+        df.drop(columns=['transcript'], inplace=True) # Final Text Purge
+        del results, res_arr; gc.collect()
 
-            p_s, n_s, u_s = yearly_pos[year], yearly_neg[year], yearly_unc[year]
-            sentences = re.split(r'[.!?]+', text)
-            sentence_scores = []
-
-            for s in sentences:
-                tokens = re.findall(r'\b\w+\b', s)
-                if not tokens: continue
-
-                count_p = sum(1 for w in tokens if w in p_s)
-                count_n = sum(1 for w in tokens if w in n_s)
-
-                results["pos"][i] += count_p
-                results["neg"][i] += count_n
-                results["unc"][i] += sum(1 for w in tokens if w in u_s)
-                results["words"][i] += len(tokens)
-
-                # Intra-doc dispersion: Sentence Polarity
-                sentence_scores.append((count_p - count_n) / (len(tokens) + 1))
-
-            if sentence_scores:
-                results["var"][i] = np.var(sentence_scores)
-                results["strong_neg"][i] = sum(1 for s in sentence_scores if s < -0.2) / len(sentence_scores)
-
-        # Level Features
-        df["net_sentiment"] = (results["pos"] - results["neg"]) / (results["words"] + 1)
-        df["pos_ratio"] = results["pos"] / (results["words"] + 1)
-        df["neg_ratio"] = results["neg"] / (results["words"] + 1)
-        df["sent_var"], df["strong_neg_pct"] = results["var"], results["strong_neg"]
-
-        # Temporal/Surprise Features
+        # 5. Rolling Stats & Interaction (Standard Logic)
         df = df.sort_values(['asset', 'filing_date'])
         groups = df.groupby("asset")["net_sentiment"]
+        df["sentiment_delta"] = groups.diff()
+        
+        # Rolling Z-Score
+        roll = groups.rolling(window=self.q, min_periods=2)
+        df["sentiment_surprise"] = df["net_sentiment"] - roll.mean().reset_index(0, drop=True)
+        df["sentiment_zscore"] = (df["sentiment_surprise"] / roll.std().reset_index(0, drop=True).replace(0, np.nan)).fillna(0)
 
-        df["sentiment_delta"] = df.groupby("asset")["net_sentiment"].diff()
+        # Volatility Join
+        asset_returns = self.data.get_asset_returns()
+        vol = asset_returns.rolling(22).std() * np.sqrt(252)
+        vol_melt = vol.reset_index().melt(id_vars='index', var_name='asset', value_name='v').rename(columns={'index':'filing_date'})
+        
+        df = pd.merge_asof(df.sort_values("filing_date"), vol_melt.sort_values("filing_date"), on="filing_date", by="asset", direction="backward")
+        df["sent_vol_interaction"] = df["net_sentiment"] * df["v"]
 
-        roll_m = groups.transform(lambda x: x.rolling(self.q, min_periods=2).mean())
-        roll_s = groups.transform(lambda x: x.rolling(self.q, min_periods=2).std())
-
-        df["sentiment_surprise"] = df["net_sentiment"] - roll_m
-        df["sentiment_zscore"] = (df["sentiment_surprise"] / roll_s).fillna(0)
-
-        # Interactions
-        fund_df = self.data.get_fundamentals()
-        if fund_df is not None:
-            # Ensure proper alignment with fundamentals
-            df = pd.merge_asof(
-                df.sort_values("filing_date"),
-                fund_df.sort_values("filing_date"),
-                on="filing_date", by="asset", direction="backward"
-            )
-            df["sent_eps_interaction"] = df["net_sentiment"] * df.get("eps_surprise", 0)
-            df["valuation_sentiment_gap"] = df["net_sentiment"] / (df.get("pe_ratio", 1) + 1)
-
-        # Alignment and Saving
+        # 6. Pivot and Save
         for feat in self.feature_names:
             if feat in df.columns:
                 setattr(self, feat, self._format_df(df, feat))
-
+        
         self._save_features_to_s3()
-        logger.info("Feature engineering completed and saved to S3.")
-
-    def _save_features_to_s3(self):
-        """Helper to persist features"""
-        for feat in self.feature_names:
-            df = getattr(self, feat)
-            if df is not None:
-                logger.info(f"Uploading {feat} to S3 bucket: {self.config.bucket_name}")
-                S3Utils.upload_df_with_index(df, self.config.bucket_name, f"data/features/{feat}.parquet")
-
+        
     # =========================
     # Public API
     # =========================
@@ -282,3 +299,11 @@ class FeatureEngineering:
                 self._compute_sentiment_features()
         else:
             self._compute_sentiment_features()
+            
+    def _save_features_to_s3(self):
+        """Helper to persist features"""
+        for feat in self.feature_names:
+            df = getattr(self, feat)
+            if df is not None:
+                logger.info(f"Uploading {feat} to S3 bucket: {self.config.bucket_name}")
+                S3Utils.upload_df_with_index(df, self.config.bucket_name, f"data/features/{feat}.parquet")
