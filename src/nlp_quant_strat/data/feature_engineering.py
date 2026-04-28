@@ -40,11 +40,22 @@ class FeatureEngineering:
     def __init__(self, data: DataManager, config: Config):
         self.data = data
         self.config = config
+        
+        # Liste complète pour satisfaire FeatureSet.build(mode="sentiment")
         self.feature_names = [
+            # Features "Legacy" présentes sur S3 et attendues par le pipeline
+            "positive_count", "negative_count", "word_count", 
+            "sentiment_density", "polarity", "polarity_delta", "pos_polarity_count_q",
+            
+            # Features "Alpha" que nous avons développées
             "pos_ratio", "neg_ratio", "net_sentiment", "sentiment_surprise", 
             "sentiment_zscore", "sentiment_delta", "sent_var", 
             "toxic_density", "sent_vol_interaction", "unc_ratio"
         ]
+        
+        for feat in self.feature_names:
+            setattr(self, feat, None)
+
         self.q = getattr(self.config, 'rolling_window_quarters', 4)
 
     def _compute_sentiment_features(self) -> None:
@@ -123,3 +134,21 @@ class FeatureEngineering:
                 setattr(self, feat, self._format_df(df, feat))
         
         self._save_features_to_s3()
+        
+    # =========================
+    # Public API
+    # =========================
+    def build_features(self):
+        """Main entry point: loads from S3 or triggers computation"""
+        logger.info("Building features...")
+        if getattr(self.config, 'load_or_compute_features', 'load') == "load":
+            try:
+                logger.info("Attempting to load all features from S3...")
+                for feat in self.feature_names:
+                    self.__setattr__(feat, self.data.aws.s3.load(key=f"data/features/{feat}.parquet"))
+                logger.info("Features loaded from S3.")
+            except Exception as e:
+                logger.warning(f"S3 load failed: {e}. Computing...")
+                self._compute_sentiment_features()
+        else:
+            self._compute_sentiment_features()

@@ -57,7 +57,7 @@
     }
   },
   "FEATURE_SET": {
-    "MODE": ["st"]
+    "MODE": ["sentiment"]
   },
   "FORECASTING": {
     "BETA_WINDOW": 252,
