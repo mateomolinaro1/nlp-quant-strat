@@ -11,6 +11,7 @@ dependencies = [
     "pandas>=3.0.1",
     "scikit-learn>=1.8.0",
     "spacy>=3.8.11",
+    "tqdm>=4.67.3",
 ]
 
 [tool.setuptools]

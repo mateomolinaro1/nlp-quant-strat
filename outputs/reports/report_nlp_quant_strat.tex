@@ -1,0 +1,604 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{adjustbox}
+\usepackage{float}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{placeins}
+\usepackage{amsmath}
+\usepackage{rotating}
+\usepackage{siunitx}
+\usepackage[a4paper, left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm]{geometry}
+\usepackage{longtable}
+\usepackage{comment}
+\usepackage{tikz}
+\usetikzlibrary{decorations.pathreplacing, calc}
+
+\title{Do Earnings Call Transcripts Predict Post-Announcement Returns?\\
+\large An NLP-Based Machine Learning Approach on Russell~1000 Equities}
+\author{Matéo Molinaro \and [Co-author]}
+\date{ENSAE Paris, 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper investigates whether earnings call transcripts contain information that is predictive of post-announcement idiosyncratic stock returns. We construct a systematic machine learning pipeline that transforms raw transcript text into quantitative signals and evaluates their out-of-sample forecasting performance on the Russell~1000 universe. We extract two families of text representations---sparse TF-IDF bag-of-words features on preprocessed transcripts, and dense semantic embeddings from the pre-trained sentence transformer \textit{all-MiniLM-L6-v2}---and combine them with traditional finance-specific sentiment scores derived from the Loughran--McDonald dictionary. For each earnings event, targets are defined as multi-horizon cumulative idiosyncratic returns---residuals from a rolling CAPM estimated exclusively on pre-filing data---at horizons of 1, 5, 21 and 63 trading days. Model training and evaluation follow a strict quarterly walk-forward cross-validation scheme that eliminates forward-looking bias by design. We compare six feature compositions across four regression models (Ridge, Lasso, Random Forest, Gradient Boosting) and evaluate performance using directional accuracy, long--short spread, and an interpretable excess-RMSE relative to the CAPM null model. This framework allows us to systematically identify which combination of text representation, prediction horizon, and model architecture extracts the most economically meaningful signals from earnings calls.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+Earnings call transcripts are among the richest sources of forward-looking corporate information available to investors. Each quarter, executives discuss financial performance, strategic priorities, and the business outlook in a format that is simultaneously structured enough for systematic analysis and nuanced enough to contain signals unlikely to be fully impounded in price the moment the call concludes. The post-earnings-announcement drift (PEAD) literature has documented that markets take time to incorporate even the quantitative earnings surprise into prices; the question of whether the \textit{qualitative} content of the call carries additional predictive power remains an active area of research.\\
+
+This project contributes to this literature by constructing a complete, end-to-end pipeline that transforms raw transcript text into out-of-sample stock return forecasts for the Russell~1000 universe. Three main questions structure the analysis. First, do different ways of representing transcript text---from classical bag-of-words to modern neural sentence embeddings---differ in their ability to predict post-announcement returns? Second, which prediction horizon (the immediate price reaction, the weekly drift, or the monthly-to-quarterly reversion) is most amenable to text-based forecasting? Third, do NLP features add incremental value on top of the classical finance-specific sentiment indicators derived from the Loughran--McDonald word list?\\
+
+The pipeline proceeds in four steps. First, we construct the prediction target: for each earnings event, the cumulative idiosyncratic return at multiple forward horizons is computed from a rolling CAPM estimated strictly on data available before the filing date, ensuring no forward-looking bias. Second, each transcript is encoded into three families of features---TF-IDF sparse vectors, dense sentence-transformer embeddings, and traditional dictionary-based sentiment scores---assembled into six feature compositions spanning the trade-off between interpretability and expressive power. Third, a quarterly walk-forward cross-validation scheme selects hyperparameters and retrains models at each rebalancing date. Fourth, out-of-sample predictions are evaluated against metrics that capture directional accuracy, long--short economic profitability, and excess predictive power relative to the CAPM null model.\\
+
+The project is implemented in Python and the full source code is available on GitHub.\footnote{\url{https://github.com/mateomolinaro1/NLPQuantStrat}} Data are loaded from Amazon S3 via a bespoke data management layer that handles return alignment, NaN policies, and transcript preprocessing.
+
+
+% ============================================================
+\section{Related Work}
+% ============================================================
+
+\paragraph{Post-earnings-announcement drift.}
+The existence of predictable return patterns following earnings announcements---commonly called PEAD---is one of the most robust anomalies in the asset pricing literature \cite{ball1968}. Prices fail to adjust immediately to the information conveyed by the earnings surprise, giving rise to a drift that can persist for months. The magnitude and persistence of PEAD motivate the use of earnings-period information, including the textual content of the accompanying call, as a basis for systematic return prediction.
+
+\paragraph{Textual analysis in finance.}
+Tetlock~\cite{tetlock2007} showed that the fraction of negative words in Wall Street Journal columns predicts near-term market-level returns, establishing that linguistic sentiment carries price-relevant information. Loughran and McDonald~\cite{lm2011} challenged the application of generic sentiment dictionaries to financial texts, demonstrating that domain-specific word lists perform substantially better in financial documents. Their dictionary, tuned to the particular language of corporate filings and calls, has since become the standard reference for dictionary-based financial sentiment analysis.
+
+\paragraph{NLP applied to earnings calls.}
+Earnings call transcripts have been used to predict both short-run returns and longer-term accounting outcomes. Early work focused on tone---the ratio of positive to negative words---and showed that a more positive tone in the prepared remarks is associated with better subsequent stock performance, while uncertainty in the Q\&A section is associated with adverse outcomes \cite{kearney2014}. More recent approaches apply neural text representations to capture meaning beyond simple word counting: bidirectional transformers, in particular, have been applied to 8-K filings and earnings call transcripts to predict stock returns at various horizons, with mixed but generally positive results \cite{yang2020finbert}.
+
+\paragraph{Walk-forward validation in ML finance.}
+A key methodological concern in applying machine learning to financial data is the avoidance of look-ahead bias. The standard i.i.d.\ cross-validation framework is inappropriate because financial observations are serially correlated and future data leaks into the training set when folds are assigned randomly. Walk-forward (or expanding-window) validation, in which the model is always trained on data up to a given date and evaluated on the subsequent period, is the standard remedy \cite{lopez2018}. Our framework follows this convention and additionally introduces a buffer between the validation and test windows to prevent the long-horizon targets of validation events from overlapping with the test period.
+
+
+% ============================================================
+\section{Data}
+% ============================================================
+
+\subsection{Asset universe and market data}
+
+The equity universe consists of Russell~1000 index constituents, providing a large-cap and mid-cap U.S. equity panel with good liquidity and broad sector coverage. Daily total returns for index constituents are sourced from a proprietary database. The benchmark return series is the Russell~1000 total return index. The risk-free rate is the daily U.S. one-month Treasury bill rate. All three series are aligned to a common daily date index: the risk-free rate and benchmark are forward-filled by up to five calendar days to handle public holidays and minor reporting gaps; asset returns are kept without filling to avoid artificially reducing return volatility.
+
+\subsection{Earnings call transcripts}
+
+Earnings call transcripts are matched to their corresponding \textit{(filing date, asset)} pair through a mapping table that links each transcript to its asset identifier and the date on which the earnings call was held. Two versions of each transcript are available:
+\begin{itemize}
+  \item \texttt{transcript}: the full unprocessed text of the call, retaining punctuation, capitalization, and stop words. Used as input to the sentence-transformer encoder, which is designed to operate on natural language.
+  \item \texttt{transcript\_cleaned}: a preprocessed version obtained by lowercasing, removing stop words, and applying Porter stemming. Used as input to TF-IDF to reduce vocabulary noise.
+\end{itemize}
+Each event is represented by exactly one (filing\_date, asset) pair. Duplicate entries (e.g., multiple recordings of the same call) are resolved by keeping the last available text.
+
+\subsection{Loughran--McDonald sentiment dictionary}
+
+Traditional sentiment features are computed using the Loughran--McDonald financial sentiment dictionary \cite{lm2011}, which provides time-stamped positive, negative, and uncertainty word lists designed specifically for corporate financial language. To avoid look-ahead bias in the dictionary itself, a yearly version is constructed: for any transcript filed in year~$t$, only words that had been added to the dictionary on or before year~$t$ are counted. This ensures that the sentiment scores are fully point-in-time.
+
+
+% ============================================================
+\section{Methodology}
+% ============================================================
+
+\subsection{Target construction: idiosyncratic returns}
+
+\subsubsection{Motivation}
+
+Raw stock returns conflate firm-specific information with market-wide and sector-wide movements. A transcript-based signal is inherently a firm-level signal and should therefore be evaluated against a firm-level return. We use CAPM idiosyncratic returns---residuals with respect to the market factor---as the prediction target, which has two practical advantages. First, idiosyncratic returns are approximately zero-mean by construction (since $\mathbb{E}[\alpha_i] \approx 0$ in an efficient market at the cross-sectional level), which makes the null-model baseline mathematically clean (see Section~\ref{sec:metrics}). Second, purging the common market component reduces noise that is uninformative for a firm-level text signal and improves the signal-to-noise ratio of the prediction task.
+
+\subsubsection{Rolling CAPM betas}
+
+For each asset $i$ and each calendar date $t$, we estimate a rolling ordinary least squares beta using a window of $W = 252$ trading days (approximately one year):
+
+\begin{equation}
+\hat{\beta}_i(t)
+= \frac{\widehat{\mathrm{Cov}}\!\left[r_i(s) - r_f(s),\; r_m(s) - r_f(s)\right]_{s \in [t-W+1,\,t]}}
+       {\widehat{\mathrm{Var}}\!\left[r_m(s) - r_f(s)\right]_{s \in [t-W+1,\,t]}},
+\end{equation}
+
+where $r_i(t)$ is the daily total return of asset $i$, $r_f(t)$ is the risk-free rate, and $r_m(t)$ is the benchmark (Russell~1000) return. The beta is computed using data up to and including date~$t$, so it is available to an investor at date~$t$ without any forward-looking bias.
+
+\subsubsection{Daily idiosyncratic returns}
+
+The daily idiosyncratic return residual is:
+
+\begin{equation}
+\mathrm{idio}_i(t)
+= \bigl(r_i(t) - r_f(t)\bigr)
+  - \hat{\beta}_i(t-1)\,\bigl(r_m(t) - r_f(t)\bigr),
+\end{equation}
+
+where $\hat{\beta}_i(t-1)$ is the beta estimated through the previous trading day, so the return at date~$t$ is not used in its own beta computation.
+
+\subsubsection{Multi-horizon cumulative targets}
+
+For each earnings event filed at date~$t$ by company~$i$, the prediction target at horizon~$h$ is the cumulative idiosyncratic return over the $h$ trading days immediately following the filing date:
+
+\begin{equation}
+y^{(h)}_{i,t}
+= \prod_{s=t+1}^{t+h} \bigl(1 + \mathrm{idio}_i(s)\bigr) - 1.
+\end{equation}
+
+The return window begins at $t+1$, the first post-call trading day, to avoid using intraday prices from the same day as the call (which would constitute look-ahead bias). We consider four horizons: $h \in \{1, 5, 21, 63\}$ trading days, corresponding approximately to one day, one week, one month, and one quarter ahead. Events near the end of the return series will have \texttt{NaN} targets where insufficient forward data exist; these events are excluded from model training and evaluation but still receive predictions.
+
+Table~\ref{tab:horizons} summarises the economic interpretation of each horizon.
+
+\begin{table}[H]
+\centering
+\caption{Target horizons and their economic interpretation}
+\label{tab:horizons}
+\begin{tabular}{rll}
+\toprule
+\textbf{Horizon $h$} & \textbf{Calendar approx.} & \textbf{Economic story} \\
+\midrule
+1d  & 1 trading day  & Immediate market reaction to the call \\
+5d  & 1 week         & Short-run information absorption / momentum \\
+21d & 1 month        & Medium-run drift (PEAD regime) \\
+63d & 1 quarter      & Long-run reversion or persistent alpha \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Text representations}
+
+\subsubsection{TF-IDF bag-of-words features}
+
+The Term Frequency--Inverse Document Frequency (TF-IDF) representation transforms each transcript into a weighted vector of token importance scores. A single \texttt{TfidfVectorizer} is fitted on the full corpus of preprocessed transcripts (\texttt{transcript\_cleaned}) and retains the top 200 tokens by corpus-level TF-IDF weight, using unigrams and bigrams ($n$-gram range $[1, 2]$). The resulting feature matrix has dimension 200, with columns labeled $\mathtt{tfidf\_0}$ through $\mathtt{tfidf\_199}$.
+
+TF-IDF is computationally cheap, fully interpretable (each dimension corresponds to a specific token or bigram), and captures the relative importance of domain-specific vocabulary across the corpus. Its primary limitation is insensitivity to word order and inability to capture semantic similarity between synonymous expressions---a limitation addressed by the sentence-transformer approach below.
+
+\subsubsection{Sentence-transformer dense embeddings}
+
+Dense semantic embeddings are produced using the pre-trained sentence-transformer \textit{all-MiniLM-L6-v2}~\cite{reimers2019}, a compact 6-layer transformer fine-tuned on over one billion sentence pairs to produce semantically meaningful 384-dimensional embeddings. Earnings call transcripts far exceed the model's 512-subword-token context limit. We address this with a \textit{chunk-and-mean-pool} strategy: each transcript is split into non-overlapping word-level chunks of 256 words (approximately 300--500 subword tokens), each chunk is encoded independently, and the chunk embeddings are averaged into a single document vector:
+
+\begin{equation}
+\mathbf{e}_{\mathrm{doc}}
+= \frac{1}{K}\sum_{k=1}^{K} f_\theta(\text{chunk}_k),
+\end{equation}
+
+where $K$ is the number of chunks and $f_\theta$ denotes the transformer encoder. Mean pooling treats all sections of the transcript as equally informative, which is a simplification but avoids the truncation artifacts of simply using the first 512 tokens. The resulting features are 384-dimensional vectors labeled $\mathtt{emb\_0}$ through $\mathtt{emb\_383}$, and are cached to S3 after computation so that the expensive inference step does not need to be repeated.
+
+\subsubsection{Dictionary-based sentiment features}
+
+Seven traditional NLP features are derived from applying the Loughran--McDonald dictionary to each transcript. They are computed in a wide panel format (dates $\times$ assets) and then looked up for each earnings event:
+
+\begin{table}[H]
+\centering
+\caption{Dictionary-based sentiment features}
+\label{tab:sentiment_features}
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{Feature} & \textbf{Definition} \\
+\midrule
+\texttt{positive\_count}       & Number of positive-sentiment words in the transcript \\
+\texttt{negative\_count}       & Number of negative-sentiment words in the transcript \\
+\texttt{word\_count}           & Total word count (proxy for transcript length) \\
+\texttt{polarity}              & $(\text{positive} - \text{negative}) \;/\; \text{word\_count}$ \\
+\texttt{sentiment\_density}    & $(\text{positive} + \text{negative}) \;/\; \text{word\_count}$ \\
+\texttt{pos\_polarity\_count\_q} & Rolling $q$-quarter ($q=4$) moving average of polarity \\
+\texttt{polarity\_delta}       & Quarter-over-quarter change in polarity (sentiment surprise) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+These features are interpretable and require no neural network inference, making them fast to compute. The momentum feature (\texttt{pos\_polarity\_count\_q}) captures whether the tone has been improving or deteriorating over the past year, while \texttt{polarity\_delta} captures sentiment surprises relative to the most recent quarter. Their joint limitation is insensitivity to context: they cannot distinguish negation, irony, or subtle forward-looking language.
+
+\subsection{Feature composition modes}
+
+Six feature compositions are defined to isolate the contribution of each representation family and study their interactions:
+
+\begin{table}[H]
+\centering
+\caption{Feature composition modes}
+\label{tab:modes}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Mode} & \textbf{TF-IDF} & \textbf{Sent.-Transformer} & \textbf{Sentiment dict.} & \textbf{Dim.} \\
+\midrule
+\texttt{sentiment}           &            &            & \checkmark & 7   \\
+\texttt{tfidf}               & \checkmark &            &            & 200 \\
+\texttt{st}                  &            & \checkmark &            & 384 \\
+\texttt{tfidf\_sentiment}    & \checkmark &            & \checkmark & 207 \\
+\texttt{st\_sentiment}       &            & \checkmark & \checkmark & 391 \\
+\texttt{all}                 & \checkmark & \checkmark & \checkmark & 591 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each mode defines a self-contained experiment: the feature matrix $X$ is assembled independently, NaN rows are dropped, and the walk-forward CV runs from scratch. Comparing \texttt{tfidf} vs.\ \texttt{tfidf\_sentiment} isolates the marginal value of dictionary features given TF-IDF; comparing \texttt{st} vs.\ \texttt{tfidf} isolates the value of semantic embeddings over bag-of-words; comparing \texttt{st\_sentiment} vs.\ \texttt{all} reveals whether TF-IDF adds anything once the transformer already captures the document semantics.
+
+\subsection{Walk-forward cross-validation framework}
+\label{sec:wfcv}
+
+\subsubsection{Motivation}
+
+Financial observations are serially dependent and their joint distribution is non-stationary. Standard i.i.d.\ cross-validation would severely overestimate out-of-sample performance by randomly assigning observations across folds and thereby leaking future return realizations into training data. We use a quarterly walk-forward scheme that is strictly out-of-sample by construction: at each rebalancing date, the model is trained exclusively on events that occurred before that date.
+
+\subsubsection{Period layout}
+
+The event panel is organized into calendar quarters. For each test quarter~$P$, the data are partitioned as follows:
+
+\begin{equation}
+\underbrace{[\;\text{train}\;]}_{\text{all past quarters}} \;\;
+\underbrace{[\;\text{val}\;]}_{V \text{ quarters}} \;\;
+\underbrace{[\;\text{buffer}\;]}_{B \text{ quarters}} \;\;
+\underbrace{[\;P\;]}_{\text{test}}
+\end{equation}
+
+\begin{itemize}
+  \item \textbf{Train}: all quarters preceding the validation window. An expanding window (default) uses all available history; a rolling window retains only the most recent $T$ quarters.
+  \item \textbf{Validation} ($V = 1$ quarter): used exclusively for hyperparameter grid search. The scaler is fitted on train only and applied to validation, preventing distribution leakage.
+  \item \textbf{Buffer} ($B = \lceil \max(h) / 63 \rceil$ quarters, automatically computed from the horizon set): a mandatory gap that prevents the forward-return window of the last validation event from extending into the test quarter. At $\max(h) = 63$ trading days, $B = 1$ quarter suffices.
+  \item \textbf{Test} ($P$): events in the current quarter receive out-of-sample predictions from the model refitted on train $\cup$ val.
+\end{itemize}
+
+Figure~\ref{fig:wkfwd_schema} illustrates three successive test quarters, showing how the train window expands while val and buffer shift forward by one quarter each time.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[xscale=0.72, yscale=0.85]
+  % --- color definitions ---
+  \definecolor{ctrain}{RGB}{173,216,230}   % light blue
+  \definecolor{cval}  {RGB}{255,223,128}   % light yellow
+  \definecolor{cbuf}  {RGB}{220,220,220}   % light gray
+  \definecolor{ctest} {RGB}{144,238,144}   % light green
+
+  % --- row 1: test = Q9 ---
+  \foreach \q/\t in {1/Q1,2/Q2,3/Q3,4/Q4,5/Q5,6/Q6,7/Q7,8/Q8,9/Q9,10/Q10,11/Q11}{
+    \draw[draw=black!40] (\q-1, 2) rectangle (\q, 2.7);
+  }
+  \fill[ctrain] (0,2) rectangle (6,2.7);
+  \fill[cval]   (6,2) rectangle (7,2.7);
+  \fill[cbuf]   (7,2) rectangle (8,2.7);
+  \fill[ctest]  (8,2) rectangle (9,2.7);
+  \node[font=\scriptsize] at (3, 2.35)   {Train (Q1--Q6)};
+  \node[font=\scriptsize] at (6.5, 2.35) {Val};
+  \node[font=\scriptsize] at (7.5, 2.35) {Buf};
+  \node[font=\scriptsize] at (8.5, 2.35) {Test: Q9};
+
+  % --- row 2: test = Q10 ---
+  \foreach \q in {1,...,11}{
+    \draw[draw=black!40] (\q-1, 1) rectangle (\q, 1.7);
+  }
+  \fill[ctrain] (0,1) rectangle (7,1.7);
+  \fill[cval]   (7,1) rectangle (8,1.7);
+  \fill[cbuf]   (8,1) rectangle (9,1.7);
+  \fill[ctest]  (9,1) rectangle (10,1.7);
+  \node[font=\scriptsize] at (3.5, 1.35)  {Train (Q1--Q7)};
+  \node[font=\scriptsize] at (7.5, 1.35)  {Val};
+  \node[font=\scriptsize] at (8.5, 1.35)  {Buf};
+  \node[font=\scriptsize] at (9.5, 1.35)  {Test: Q10};
+
+  % --- row 3: test = Q11 ---
+  \foreach \q in {1,...,11}{
+    \draw[draw=black!40] (\q-1, 0) rectangle (\q, 0.7);
+  }
+  \fill[ctrain] (0,0) rectangle (8,0.7);
+  \fill[cval]   (8,0) rectangle (9,0.7);
+  \fill[cbuf]   (9,0) rectangle (10,0.7);
+  \fill[ctest]  (10,0) rectangle (11,0.7);
+  \node[font=\scriptsize] at (4, 0.35)    {Train (Q1--Q8)};
+  \node[font=\scriptsize] at (8.5, 0.35)  {Val};
+  \node[font=\scriptsize] at (9.5, 0.35)  {Buf};
+  \node[font=\scriptsize] at (10.5, 0.35) {Test: Q11};
+
+  % --- legend ---
+  \fill[ctrain] (0,-0.8)  rectangle (0.5,-0.5); \node[right, font=\scriptsize] at (0.6,-0.65)  {Train};
+  \fill[cval]   (2,-0.8)  rectangle (2.5,-0.5); \node[right, font=\scriptsize] at (2.6,-0.65)  {Validation ($V=1$)};
+  \fill[cbuf]   (5,-0.8)  rectangle (5.5,-0.5); \node[right, font=\scriptsize] at (5.6,-0.65)  {Buffer ($B=1$)};
+  \fill[ctest]  (8,-0.8)  rectangle (8.5,-0.5); \node[right, font=\scriptsize] at (8.6,-0.65)  {Test};
+\end{tikzpicture}
+\caption{Expanding walk-forward CV for three successive test quarters. The train window grows by one quarter at each step while val, buffer, and test shift forward together.}
+\label{fig:wkfwd_schema}
+\end{figure}
+\FloatBarrier
+
+\subsubsection{Hyperparameter selection and scaling}
+
+For each (test period, horizon, model) combination, hyperparameters are selected by grid search on the validation split. Feature scaling (StandardScaler) is fitted on the training events only and applied to validation events before scoring, so that the distribution of the validation split does not leak into the scaler fit. The validation scoring function is the \textit{long--short score}:
+
+\begin{equation}
+\mathrm{LS}\text{-}\mathrm{score}
+= \frac{1}{n_{\mathrm{val}}} \sum_{j \in \mathrm{val}}
+  \mathrm{sign}(\hat{y}_j)\, y_j,
+\label{eq:ls_score}
+\end{equation}
+
+which directly estimates the expected P\&L per unit long/short bet and is more economically meaningful than RMSE for a trading objective. If fewer than 5 events are available in the validation window, the first grid point is used without scoring.
+
+\subsubsection{Final fit and prediction}
+
+Once best hyperparameters are identified, a final model is fitted on the combined train $\cup$ val sample using a fresh scaler refitted on that combined window. Predictions are then generated for all test-period events, including those with \texttt{NaN} targets (the model still produces a score, but the event is excluded from metric computation). This two-phase scaling (search scaler on train; final scaler on train $\cup$ val) maximises the data used for the final model while ensuring that neither phase involves information from the test period.
+
+\subsubsection{Minimum data requirements}
+
+A (period, horizon, model) combination is skipped if fewer than 50 non-NaN training events exist (\texttt{MIN\_TRAIN\_EVENTS}). The CV does not begin until at least 8 calendar quarters of history have accumulated (\texttt{MIN\_TRAIN\_PERIODS}), reflecting the 252-day rolling beta window: predictions from early periods would rely on unreliable betas and are excluded to avoid contaminating the evaluation.
+
+\subsection{Forecasting models}
+\label{sec:models}
+
+Four regression models from scikit-learn are compared, spanning a range of complexity and inductive bias:
+
+\begin{table}[H]
+\centering
+\caption{Forecasting models and hyperparameter grids}
+\label{tab:models}
+\begin{tabular}{llp{7.0cm}}
+\toprule
+\textbf{Model} & \textbf{Category} & \textbf{Hyperparameter grid} \\
+\midrule
+Ridge        & Regularized linear        & $\alpha \in \{0.01,\, 0.1,\, 1.0\}$ \\[0.3em]
+Lasso        & Regularized linear (sparse) & $\alpha \in \{0.01,\, 0.1,\, 1.0\}$ \\[0.3em]
+Random Forest    & Ensemble (bagging)    &
+  $n\_\text{est.} \in \{100,\,200\}$;\;
+  $\text{max\_depth} \in \{3,\,5\}$ \\[0.3em]
+Gradient Boosting & Ensemble (boosting) &
+  $n\_\text{est.} \in \{100,\,200\}$;\;
+  $\text{depth} = 3$;\;
+  $\text{lr} \in \{0.05,\,0.1\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Ridge and Lasso serve as well-regularized linear baselines appropriate for high-dimensional feature spaces (TF-IDF, sentence-transformer). Lasso's $\ell_1$ penalty additionally performs implicit feature selection, which may be beneficial when few of the 200 or 384 dimensions carry genuine predictive signal. Random Forest and Gradient Boosting capture non-linear interactions at the cost of higher computational overhead; in high dimensions they are also more prone to overfitting, making the val-set grid search critical. All models are cloned at each fold using \texttt{sklearn.base.clone} to ensure complete independence between folds.
+
+\subsection{Evaluation metrics}
+\label{sec:metrics}
+
+Out-of-sample performance is evaluated per (quarter, model, horizon) triple using the following metrics, which together characterize both statistical and economic quality.
+
+\subsubsection{Hit rate}
+
+\begin{equation}
+\mathrm{HitRate} = \frac{1}{n} \sum_{j=1}^{n} \mathbf{1}\!\left[\mathrm{sign}(\hat{y}_j) = \mathrm{sign}(y_j)\right].
+\end{equation}
+
+The natural baseline is 50\% (random directional guessing). Values above 50\% indicate consistent directional skill; values meaningfully above 55\% are considered economically significant in practice.
+
+\subsubsection{Long--short spread}
+
+We form a long leg (events with $\hat{y}_j > 0$) and a short leg ($\hat{y}_j < 0$) and compute:
+
+\begin{equation}
+\mathrm{Spread} = \bar{y}_{\mathrm{long}} - \bar{y}_{\mathrm{short}},
+\end{equation}
+
+where $\bar{y}$ denotes the mean realized idiosyncratic return of the respective leg. A positive spread indicates that the signal correctly ranks events by subsequent return. Statistical significance is assessed via the $t$-statistic:
+
+\begin{equation}
+t = \frac{\overline{\mathrm{MSR}}}{\widehat{\sigma}(\mathrm{MSR})/\sqrt{n}},
+\end{equation}
+
+where $\mathrm{MSR}_j = \mathrm{sign}(\hat{y}_j)\, y_j$ is the signed return per event, $\overline{\mathrm{MSR}}$ is its mean, and $\widehat{\sigma}$ its empirical standard deviation. This $t$-statistic is equivalent to a one-sample $t$-test of whether the mean signed return is zero.
+
+\subsubsection{Mean signed return (long--short score)}
+
+\begin{equation}
+\mathrm{MSR} = \frac{1}{n}\sum_{j=1}^{n} \mathrm{sign}(\hat{y}_j)\,y_j,
+\end{equation}
+
+identical to the validation scorer (equation~\ref{eq:ls_score}). MSR can be interpreted as the expected return per unit of capital deployed in a long/short strategy that bets one unit on the predicted direction of each event. The baseline is 0 (no directional skill).
+
+\subsubsection{Excess RMSE}
+
+The standard RMSE is difficult to interpret in isolation because its absolute magnitude depends on the scale of idiosyncratic returns, which varies across assets and horizons. We define instead an \textit{excess RMSE}:
+
+\begin{equation}
+\mathrm{ExcessRMSE} = \mathrm{RMSE} - \sigma(y),
+\end{equation}
+
+where $\sigma(y) = \sqrt{\frac{1}{n}\sum_{j=1}^{n} y_j^2}$ is computed with $\mathrm{ddof}=0$.
+
+The key property is that the null model---always predicting zero---achieves $\mathrm{ExcessRMSE} = 0$ exactly. Because idiosyncratic returns are approximately zero-mean by the CAPM construction ($\bar{y} \approx 0$):
+
+\begin{equation}
+\mathrm{RMSE}_{\hat{y}=0}
+= \sqrt{\frac{1}{n}\sum_{j} (y_j - 0)^2}
+= \sqrt{\frac{1}{n}\sum_{j} y_j^2}
+= \sigma(y),
+\end{equation}
+
+so $\mathrm{ExcessRMSE}_{\hat{y}=0} = \sigma(y) - \sigma(y) = 0$. A model with $\mathrm{ExcessRMSE} < 0$ reduces point-forecast error below the unconditional mean; a model with $\mathrm{ExcessRMSE} > 0$ is strictly worse than predicting zero. This makes the baseline interpretable and comparable across horizons.
+
+Table~\ref{tab:metric_baselines} summarises the baseline value and ``good'' direction for each metric.
+
+\begin{table}[H]
+\centering
+\caption{Metric baselines and interpretation}
+\label{tab:metric_baselines}
+\begin{tabular}{llll}
+\toprule
+\textbf{Metric}        & \textbf{Null baseline} & \textbf{Better than null} & \textbf{Interpretation} \\
+\midrule
+HitRate         & 50\%  & $> 50\%$  & Directional accuracy \\
+Spread          & 0     & $> 0$     & Long--short P\&L per bet \\
+MSR             & 0     & $> 0$     & Expected signed return \\
+$t$-stat        & 0     & $> 1.96$  & Statistical significance at 5\% \\
+ExcessRMSE      & 0     & $< 0$     & Point-forecast improvement \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================
+\section{Results}
+% ============================================================
+
+Results are pending the completion of the walk-forward CV runs across all six feature modes and four horizons. This section will be populated with the following analyses.
+
+\subsection{Aggregate out-of-sample performance}
+
+A summary table will report, for each (mode, model, horizon) combination, the time-series average of HitRate, Spread, MSR, $t$-statistic, and ExcessRMSE. This will allow a direct read-off of which configuration performs best and which modes add value over the \texttt{sentiment} baseline.
+
+\subsection{Time-series stability}
+
+Rolling OOS metrics computed over a 252-day (one-year) window will be plotted to assess the stability of predictive performance across market regimes. Models that perform well only in specific episodes (e.g., high-volatility periods around earnings seasons) are less actionable than those with consistent performance.
+
+\subsection{Mode comparison}
+
+A pairwise comparison of the six feature modes, averaged across models and horizons, will isolate the marginal contribution of each representation family. Of particular interest are:
+\begin{itemize}
+  \item \texttt{sentiment} vs.\ \texttt{tfidf}: does the full token-importance distribution add value over the seven aggregate sentiment scores?
+  \item \texttt{tfidf} vs.\ \texttt{st}: does semantic meaning (transformer embeddings) improve on token frequency (TF-IDF)?
+  \item \texttt{st\_sentiment} vs.\ \texttt{all}: does TF-IDF add anything once the transformer already encodes the document content?
+\end{itemize}
+
+\subsection{Horizon analysis}
+
+Performance metrics will be decomposed by horizon to assess whether the predictive content of transcripts is concentrated in the immediate price reaction (1d), the short-run drift (5d), the medium-run adjustment (21d), or the quarterly reversion (63d). Financial theory suggests that the most liquid information (market tone, guidance updates) should be absorbed quickly, while more subtle signals (management credibility, strategic nuance) may take longer to be reflected in prices.
+
+\subsection{Model diagnostics}
+
+For the tree-based models (Random Forest, Gradient Boosting), feature importance scores will be extracted and aggregated across folds to identify which TF-IDF tokens or sentiment dimensions drive the most variance in predictions. For Lasso, the distribution of non-zero coefficients across folds will reveal how sparse the solution is and whether a consistent subset of features is selected over time.
+
+
+% ============================================================
+\section{Discussion and Limitations}
+% ============================================================
+
+\paragraph{Signal-to-noise ratio.}
+Idiosyncratic returns are notoriously noisy, and the fraction of return variance explained by any single source of information is typically very small. This means that even economically meaningful signals may produce HitRates barely above 50\% and ExcessRMSE improvements of a few basis points. The sample size (number of earnings events per quarter) is therefore a key constraint: with too few events, the metrics are dominated by sampling noise.
+
+\paragraph{Dimensionality.}
+The \texttt{all} mode concatenates 591 features. With typical quarterly event counts, this represents a very unfavorable parameter-to-observation ratio for linear models. Regularization (Ridge, Lasso) is designed to address this, but the high-dimensional TF-IDF and sentence-transformer features may contain mostly noise at this level of granularity. PCA dimensionality reduction is a natural extension not explored in the current pipeline.
+
+\paragraph{No earnings surprise control.}
+The targets are CAPM idiosyncratic returns, which include the component driven by the quantitative earnings surprise (EPS vs.\ analyst consensus). A model that effectively learns to predict the sign of the earnings surprise would achieve positive MSR without necessarily reading the transcript text. Future work should orthogonalize targets or features with respect to the numerical surprise to isolate the pure textual signal.
+
+\paragraph{No sector neutralization.}
+Earnings calls cluster by sector (technology, financials, healthcare tend to report in tight windows). Cross-sectional sector effects during a quarter could cause the model to learn industry timing rather than firm-level transcript signals. Sector-neutralized targets or features are a natural robustness check.
+
+\paragraph{Chunk pooling strategy.}
+The mean-pool strategy for sentence-transformer embeddings weights all sections of a transcript equally. In practice, the Q\&A section and the prepared guidance often contain the most forward-looking information. Segment-aware pooling (e.g., weighting Q\&A sections more heavily, or encoding the CEO's prepared remarks separately from the CFO's) could improve signal quality.
+
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+This paper constructs a rigorous end-to-end machine learning pipeline to test whether earnings call transcripts contain quantitative signals predictive of post-announcement idiosyncratic stock returns in the Russell~1000 universe. The pipeline covers CAPM-based target construction, three complementary text representation strategies (TF-IDF, sentence-transformer embeddings, and Loughran--McDonald sentiment features), a quarterly walk-forward cross-validation framework free of forward-looking bias, and a suite of economically motivated evaluation metrics with transparent null-model baselines.
+
+The framework is designed to answer three questions that are currently unanswered pending the completion of the CV runs. First, which text representation---classical bag-of-words, modern neural embeddings, or traditional sentiment scores---carries the most predictive signal about post-earnings return dynamics? Second, at which horizon is text-based prediction most effective: the immediate price reaction (1d), the short-run drift (5d), or the medium-to-long-run adjustment (21d, 63d)? Third, do embedding-based approaches add value over interpretable sentiment scores, or does the additional representational complexity fail to translate into out-of-sample gains given the noise inherent in stock returns?
+
+Regardless of the quantitative outcomes, the pipeline itself constitutes a reusable infrastructure for systematic NLP-based return prediction that can be extended in several directions: additional text sources such as analyst reports or 8-K filings, finer-grained text segmentation to distinguish prepared remarks from Q\&A, larger pre-trained language models, multi-factor targets that control for earnings surprise, or a direct integration with the portfolio construction layer to evaluate end-to-end strategy performance net of transaction costs.
+
+
+% ============================================================
+\begin{thebibliography}{99}
+
+\bibitem{ball1968}
+Ball, R., \& Brown, P. (1968). An empirical evaluation of accounting income numbers. \textit{Journal of Accounting Research}, 6(2), 159--178.
+
+\bibitem{lm2011}
+Loughran, T., \& McDonald, B. (2011). When is a Liability not a Liability? Textual Analysis, Dictionaries, and 10-Ks. \textit{Journal of Finance}, 66(1), 35--65.
+
+\bibitem{reimers2019}
+Reimers, N., \& Gurevych, I. (2019). Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks. \textit{Proceedings of EMNLP-IJCNLP 2019}. \url{https://arxiv.org/abs/1908.10084}
+
+\bibitem{tetlock2007}
+Tetlock, P. C. (2007). Giving Content to Investor Sentiment: The Role of Media in the Stock Market. \textit{Journal of Finance}, 62(3), 1139--1168.
+
+\bibitem{kearney2014}
+Kearney, C., \& Liu, S. (2014). Textual sentiment in finance: A survey of methods and models. \textit{International Review of Financial Analysis}, 33, 171--185.
+
+\bibitem{yang2020finbert}
+Yang, Y., Uy, M. C. S., \& Huang, A. (2020). FinBERT: A Pretrained Language Model for Financial Communications. \textit{arXiv preprint}. \url{https://arxiv.org/abs/2006.08097}
+
+\bibitem{lopez2018}
+López de Prado, M. (2018). \textit{Advances in Financial Machine Learning}. Wiley.
+
+\bibitem{fama1993}
+Fama, E. F., \& French, K. R. (1993). Common risk factors in the returns on stocks and bonds. \textit{Journal of Financial Economics}, 33(1), 3--56.
+
+\end{thebibliography}
+
+
+% ============================================================
+\newpage
+\section{Appendix}
+% ============================================================
+
+\subsection{Pipeline module summary}
+
+\begin{table}[H]
+\centering
+\caption{Python module structure of the \texttt{nlp\_quant\_strat} package}
+\label{tab:pipeline}
+\begin{tabular}{lp{9.0cm}}
+\toprule
+\textbf{Module} & \textbf{Role} \\
+\midrule
+\texttt{data/data\_manager.py}         & Loads and aligns returns, benchmark, risk-free rate, and transcripts from S3; manages NaN policy and asset-mapping table. \\[0.3em]
+\texttt{data/feature\_engineering.py}  & Computes panel-format Loughran--McDonald sentiment features aligned to the asset-return grid. \\[0.3em]
+\texttt{forecasting/targets.py}        & Rolling CAPM betas + cumulative idiosyncratic return targets at multiple horizons (\texttt{TargetBuilder}). \\[0.3em]
+\texttt{forecasting/embeddings.py}     & TF-IDF and sentence-transformer encoders with deterministic S3 content-hash caching (\texttt{TFIDFBuilder}, \texttt{SentenceTransformerBuilder}). \\[0.3em]
+\texttt{forecasting/feature\_set.py}   & Assembles $(X, y)$ for a chosen feature mode, drops NaN rows, logs coverage (\texttt{FeatureSet}). \\[0.3em]
+\texttt{forecasting/earnings\_wf\_cv.py} & Quarterly walk-forward CV engine: period splitting, scaling, grid search, final fit, OOS metrics, joblib parallelism, S3 result caching (\texttt{EarningsWalkForwardCV}). \\[0.3em]
+\texttt{utils/config.py}               & Reads \texttt{run\_pipeline\_config.json} into a typed \texttt{Config} dataclass. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Configuration parameters}
+
+\begin{table}[H]
+\centering
+\caption{Key parameters in \texttt{run\_pipeline\_config.json}}
+\label{tab:config}
+\begin{longtable}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{FORECASTING.BETA\_WINDOW}      & 252          & Rolling window (days) for CAPM beta estimation \\
+\texttt{FORECASTING.HORIZONS}          & [1,5,21,63]  & Forward return horizons (trading days) \\
+\texttt{FORECASTING.REFIT\_FREQUENCY}  & \texttt{"Q"} & Calendar granularity of test periods \\
+\texttt{FORECASTING.TRAIN\_WINDOW}     & null         & Rolling train window (null = expanding) \\
+\texttt{FORECASTING.VAL\_WINDOW}       & 1            & Validation window size (periods) \\
+\texttt{FORECASTING.MIN\_TRAIN\_PERIODS} & 8          & Minimum train history before first test \\
+\texttt{FORECASTING.MIN\_TRAIN\_EVENTS} & 50          & Minimum non-NaN events per (period, horizon) \\
+\texttt{FORECASTING.MIN\_VAL\_EVENTS}  & 5            & Minimum val events for hyperparameter scoring \\
+\texttt{FEATURE\_SET.MODE}             & [all 6]      & Feature composition modes to evaluate \\
+\texttt{EMBEDDINGS.SENTENCE\_TRANSFORMER.MODEL\_NAME} & \texttt{all-MiniLM-L6-v2} & Pre-trained encoder \\
+\texttt{EMBEDDINGS.SENTENCE\_TRANSFORMER.CHUNK\_SIZE} & 256 & Words per transcript chunk \\
+\texttt{EMBEDDINGS.TFIDF.MAX\_FEATURES} & 200         & TF-IDF vocabulary size \\
+\texttt{EMBEDDINGS.TFIDF.NGRAM\_RANGE} & [1,2]        & Unigrams and bigrams \\
+\texttt{CV\_RESULTS.LOAD\_OR\_COMPUTE} & \texttt{"compute"} & Whether to load cached S3 results \\
+\texttt{CV\_RESULTS.SAVE\_RESULTS}     & true         & Save CV output to S3 after each run \\
+\texttt{CV\_RESULTS.N\_JOBS}           & $-1$         & Parallel workers for the period loop \\
+\bottomrule
+\end{longtable}
+\end{table}
+
+\subsection{Feature mode dimensions (to be filled)}
+
+\begin{table}[H]
+\centering
+\caption{Feature matrix statistics per mode (to be populated after the full CV run)}
+\label{tab:feature_dims}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Mode} & \textbf{Dim.} & \textbf{Events (train+test)} & \textbf{NaN drop rate} & \textbf{Avg.\ events/period} \\
+\midrule
+\texttt{sentiment}        & 7   & TBD & TBD & TBD \\
+\texttt{tfidf}            & 200 & TBD & TBD & TBD \\
+\texttt{st}               & 384 & TBD & TBD & TBD \\
+\texttt{tfidf\_sentiment} & 207 & TBD & TBD & TBD \\
+\texttt{st\_sentiment}    & 391 & TBD & TBD & TBD \\
+\texttt{all}              & 591 & TBD & TBD & TBD \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

@@ -183,7 +183,7 @@ class DataManager:
                 limit = policy.get("limit", None)
                 setattr(self, attr, obj.ffill(limit=limit))
 
-    def _get_formatted_unprocessed_transcripts(self) -> pd.DataFrame:
+    def get_formatted_unprocessed_transcripts(self) -> pd.DataFrame:
         filename = self.config.formatted_unprocessed_transcripts_filename
         attr_name = Path(filename).stem
 
@@ -193,7 +193,7 @@ class DataManager:
         formatted_unprocessed_transcripts_obj = getattr(self, attr_name)
         return formatted_unprocessed_transcripts_obj
 
-    def _get_formatted_preprocessed_transcripts(self) -> pd.DataFrame:
+    def get_formatted_preprocessed_transcripts(self) -> pd.DataFrame:
         filename = self.config.formatted_preprocessed_transcripts_filename
         attr_name = Path(filename).stem
 
@@ -236,7 +236,7 @@ class DataManager:
         """
 
         # 1️ prepare transcripts
-        df_transcripts = self._get_formatted_unprocessed_transcripts()
+        df_transcripts = self.get_formatted_unprocessed_transcripts()
         df_transcripts = df_transcripts.reset_index()
         df_transcripts = df_transcripts.rename(columns={'ticker_api': 'ticker'})
         df_transcripts['filing_date'] = pd.to_datetime(df_transcripts['filing_date'])
