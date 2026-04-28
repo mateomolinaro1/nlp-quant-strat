@@ -7,13 +7,9 @@ import pandas as pd
 import re
 import logging
 import gc
-import multiprocessing
-from joblib import Parallel, delayed
-from tqdm import tqdm
 from nlp_quant_strat.data.data_manager import DataManager
 from nlp_quant_strat.utils.config import Config
 from nlp_quant_strat.utils.utils import S3Utils
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +93,7 @@ class FeatureEngineering:
                     if 0 < u <= year: unc_set.add(word)
                     elif u < 0 and -u <= year: unc_set.discard(word)
             yearly_pos[year] = pos_set
+            yearly_neg[year] = neg_set
             yearly_unc[year] = unc_set
         return yearly_pos, yearly_neg, yearly_unc
 
@@ -143,7 +140,7 @@ class FeatureEngineering:
 
     @staticmethod
     def _count_sentiment_words(tokenized_series, yearly_pos, yearly_neg, years_series):
-        """Count positive/negative words in a single pass"""
+        """Count positive/negative/uncertainty words in a single pass"""
         n = len(tokenized_series)
         pos_counts = np.zeros(n, dtype=np.int32)
         neg_counts = np.zeros(n, dtype=np.int32)
@@ -156,6 +153,16 @@ class FeatureEngineering:
                 pos_counts[i] = sum(1 for w in words if w in pos_set)
                 neg_counts[i] = sum(1 for w in words if w in neg_set)
         return pos_counts, neg_counts, word_counts
+
+    @staticmethod
+    def _count_uncertainty_words(tokenized_series, yearly_unc, years_series):
+        """Count uncertainty words in a single pass"""
+        n = len(tokenized_series)
+        unc_counts = np.zeros(n, dtype=np.int32)
+        for i, (words, year) in enumerate(zip(tokenized_series, years_series)):
+            if len(words) > 0:
+                unc_counts[i] = sum(1 for w in words if w in yearly_unc[year])
+        return unc_counts
 
     @staticmethod
     def _compute_raw_scores(df):
@@ -190,7 +197,7 @@ class FeatureEngineering:
         return variance, strong_neg_pct
 
     def _compute_temporal_features(self, df):
-        """Compute Delta and Rolling Momentum features"""
+        """Compute Delta, Rolling Momentum, z-score, and surprise features"""
         df = df.sort_values(['asset', 'filing_date'])
 
         # Momentum: rolling sum of positive quarters
@@ -203,84 +210,133 @@ class FeatureEngineering:
 
         # Delta: Change in tone vs previous report
         df["polarity_delta"] = df.groupby("asset")["polarity"].diff()
+
+        # Net-sentiment delta
+        df["sentiment_delta"] = df.groupby("asset")["net_sentiment"].diff()
+
+        # Rolling mean/std of polarity for surprise and z-score
+        rolling_mean = (
+            df.groupby("asset")["polarity"]
+            .rolling(window=self.q, min_periods=1)
+            .mean()
+            .reset_index(level=0, drop=True)
+        )
+        rolling_std = (
+            df.groupby("asset")["polarity"]
+            .rolling(window=self.q, min_periods=1)
+            .std()
+            .reset_index(level=0, drop=True)
+        )
+        df["sentiment_surprise"] = df["polarity"] - rolling_mean
+        df["sentiment_zscore"] = df["sentiment_surprise"] / (rolling_std + 1e-8)
+        return df
+
+    def _compute_sentence_level_features(self, df: pd.DataFrame, yearly_pos: dict, yearly_neg: dict) -> pd.DataFrame:
+        """Add sent_var, toxic_density, and sent_vol_interaction columns (row-wise sentence parsing)."""
+        logger.info("Computing sentence-level features (%d documents)...", len(df))
+        years = df['filing_date'].dt.year.values
+        texts = df['transcript'].fillna("").values
+
+        sent_var_arr   = np.zeros(len(df), dtype=np.float64)
+        toxic_arr      = np.zeros(len(df), dtype=np.float64)
+
+        for i, (text, year) in enumerate(zip(texts, years)):
+            var, tox = self._compute_sentence_metrics(text, yearly_pos[year], yearly_neg[year])
+            sent_var_arr[i] = var
+            toxic_arr[i]    = tox
+
+        df['sent_var']      = sent_var_arr
+        df['toxic_density'] = toxic_arr
+        # Interaction: intra-doc sentiment dispersion × negative-word density
+        df['sent_vol_interaction'] = df['sent_var'] * df['neg_ratio']
         return df
 
     def _compute_sentiment_features(self) -> None:
-        if self.data.mapping_df is None: return
-
-        # 1. Load Transcripts (Remove the 'columns' argument here)
-        logger.info("Loading full transcripts for processing...")
-        t_key = getattr(self.config, 'TRANSCRIPTS_FILENAME', 'data/transcripts/formatted_unprocessed_transcripts.parquet')
-        
-        # FIX: No 'columns' argument allowed by better_aws
-        df_full = self.data.aws.s3.load(key=t_key)
-        
-        # IMMEDIATELY select only the columns we need to save RAM
-        # This keeps 'transcript', 'ticker_api', and 'filing_date'
-        needed_cols = ['ticker_api', 'filing_date', 'transcript']
-        df_full = df_full[needed_cols]
-        
-        # Standardize and Merge
-        df_full.rename(columns={'ticker_api': 'ticker'}, inplace=True)
-        df_full['filing_date'] = pd.to_datetime(df_full['filing_date'])
-        
-        df = pd.merge(self.data.mapping_df[['ticker', 'filing_date', 'asset']], df_full, on=['ticker', 'filing_date'], how='inner')
-        
-        # PURGE df_full immediately to free up the 2x RAM spike
-        del df_full 
         import gc
-        gc.collect()
+        if self.data.mapping_df is None:
+            return
 
-        # 2. Setup Dictionaries
+        # 1. Load transcripts — reset_index so parquet index cols become columns
+        logger.info("Loading full transcripts for processing...")
+        t_key = getattr(
+            self.config, 'TRANSCRIPTS_FILENAME',
+            'data/transcripts/formatted_unprocessed_transcripts.parquet',
+        )
+        df_full = self.data.aws.s3.load(key=t_key)
+        if not isinstance(df_full.index, pd.RangeIndex):
+            df_full = df_full.reset_index()
+
+        # Normalise column names (ticker_api → ticker)
+        if 'ticker_api' in df_full.columns:
+            df_full = df_full.rename(columns={'ticker_api': 'ticker'})
+        df_full['filing_date'] = pd.to_datetime(df_full['filing_date'])
+
+        available = [c for c in ['ticker', 'filing_date', 'transcript'] if c in df_full.columns]
+        df_full = df_full[available]
+
+        # 2. Merge with mapping to get asset identifier
+        df = pd.merge(
+            self.data.mapping_df[['ticker', 'filing_date', 'asset']],
+            df_full,
+            on=['ticker', 'filing_date'],
+            how='inner',
+        )
+        del df_full; gc.collect()
+
+        logger.info("Merged transcript events: %d", len(df))
+
+        # 3. Build Loughran-McDonald yearly dictionaries
         yearly_pos, yearly_neg, yearly_unc = self._build_yearly_dicts()
 
-        # 3. Parallel Processing (The "Turbo" Part)
-        logger.info(f"Processing {len(df)} documents on multiple cores...")
-        n_cores = multiprocessing.cpu_count() - 1
-        
-        results = Parallel(n_jobs=n_cores)(
-            delayed(_process_single_doc)(
-                df['transcript'].iloc[i], 
-                df['filing_date'].iloc[i].year,
-                yearly_pos, yearly_neg, yearly_unc
-            ) for i in tqdm(range(len(df)), desc="NLP Mining")
+        # 4. Tokenize and count sentiment + uncertainty words
+        tokenized = self._tokenize_transcripts(df)
+        years = df['filing_date'].dt.year
+        pos_counts, neg_counts, word_counts = self._count_sentiment_words(
+            tokenized, yearly_pos, yearly_neg, years
         )
+        unc_counts = self._count_uncertainty_words(tokenized, yearly_unc, years)
 
-        # 4. Map Results and Purge Text
-        res_arr = np.array(results, dtype='float32')
-        df["net_sentiment"] = (res_arr[:, 0] - res_arr[:, 1]) / (res_arr[:, 3] + 1)
-        df["pos_ratio"] = res_arr[:, 0] / (res_arr[:, 3] + 1)
-        df["neg_ratio"] = res_arr[:, 1] / (res_arr[:, 3] + 1)
-        df["unc_ratio"] = res_arr[:, 2] / (res_arr[:, 3] + 1)
-        df["sent_var"], df["toxic_density"] = res_arr[:, 4], res_arr[:, 5]
-        
-        df.drop(columns=['transcript'], inplace=True) # Final Text Purge
-        del results, res_arr; gc.collect()
+        df['positive_count'] = pos_counts
+        df['negative_count'] = neg_counts
+        df['word_count']     = word_counts
+        # aliases expected by _compute_raw_scores
+        df['pos_count'] = pos_counts
+        df['neg_count'] = neg_counts
 
-        # 5. Rolling Stats & Interaction (Standard Logic)
-        df = df.sort_values(['asset', 'filing_date'])
-        groups = df.groupby("asset")["net_sentiment"]
-        df["sentiment_delta"] = groups.diff()
-        
-        # Rolling Z-Score
-        roll = groups.rolling(window=self.q, min_periods=2)
-        df["sentiment_surprise"] = df["net_sentiment"] - roll.mean().reset_index(0, drop=True)
-        df["sentiment_zscore"] = (df["sentiment_surprise"] / roll.std().reset_index(0, drop=True).replace(0, np.nan)).fillna(0)
+        # 4b. Simple ratio / density features
+        df['pos_ratio']     = pos_counts / (word_counts + 1)
+        df['neg_ratio']     = neg_counts / (word_counts + 1)
+        df['net_sentiment'] = (pos_counts - neg_counts) / (word_counts + 1)
+        df['unc_ratio']     = unc_counts / (word_counts + 1)
 
-        # Volatility Join
-        asset_returns = self.data.get_asset_returns()
-        vol = asset_returns.rolling(22).std() * np.sqrt(252)
-        vol_melt = vol.reset_index().melt(id_vars='index', var_name='asset', value_name='v').rename(columns={'index':'filing_date'})
-        
-        df = pd.merge_asof(df.sort_values("filing_date"), vol_melt.sort_values("filing_date"), on="filing_date", by="asset", direction="backward")
-        df["sent_vol_interaction"] = df["net_sentiment"] * df["v"]
+        # 5. Raw sentiment scores (polarity, sentiment_density, is_pos_polarity)
+        df = self._compute_raw_scores(df)
 
-        # 6. Pivot and Save
+        # 6. Sentence-level features (sent_var, toxic_density, sent_vol_interaction)
+        df = self._compute_sentence_level_features(df, yearly_pos, yearly_neg)
+
+        # 7. Temporal features (polarity_delta, pos_polarity_count_Nq, sentiment_delta,
+        #    sentiment_surprise, sentiment_zscore)
+        df = self._compute_temporal_features(df)
+        # Rename so the attribute name matches feature_names and FeatureSet._SENTIMENT_ATTRS
+        df = df.rename(columns={f'pos_polarity_count_{self.q}q': 'pos_polarity_count_q'})
+
+        df.drop(columns=['transcript', 'pos_count', 'neg_count', 'is_pos_polarity'],
+                errors='ignore', inplace=True)
+        gc.collect()
+
+        # 8. Pivot each feature to (dates × assets) panel and forward-fill
+        missing = []
         for feat in self.feature_names:
             if feat in df.columns:
                 setattr(self, feat, self._format_df(df, feat))
-        
-        self._save_features_to_s3()
+            else:
+                missing.append(feat)
+        if missing:
+            logger.warning("Features not found in df and will be None: %s", missing)
+
+        if getattr(self.config, 'save_features_to_s3', True):
+            self._save_features_to_s3()
         
     # =========================
     # Public API

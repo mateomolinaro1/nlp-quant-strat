@@ -245,7 +245,7 @@ def run_forecasting_phase() -> "EarningsWalkForwardResult":  # noqa: F821
 # PHASE 2 — Cross-Sectional Backtests
 # ===========================================================================
 
-def run_backtest_phase() -> None:
+def run_backtest_phase() -> pd.DataFrame:
     from nlp_quant_strat.backtester.strategies import CrossSectionalPercentiles
     from nlp_quant_strat.backtester.portfolio import EqualWeightingScheme
     from nlp_quant_strat.backtester.backtest import Backtest
@@ -259,6 +259,8 @@ def run_backtest_phase() -> None:
 
     features_to_backtest = feature_eng.feature_names
     logger.info("Features to backtest: %s", features_to_backtest)
+
+    all_perfs: list = []  # collect (name, PerformanceAnalyser) for comparison plots
 
     for feature_name in features_to_backtest:
         signal_values = getattr(feature_eng, feature_name, None)
@@ -320,6 +322,8 @@ def run_backtest_phase() -> None:
             rebal_freq=f"{config.rebal_periods} days",
         )
         perf.compute_metrics()
+        perf.compute_rolling_metrics(window=config.rolling_window_performance)
+        all_perfs.append((feature_name, perf))
 
         vizu = Visualizer(performance=perf)
         vizu.plot_cumulative_performance(
@@ -339,7 +343,149 @@ def run_backtest_phase() -> None:
 
         logger.info("  %s — done  (%.1fs)", feature_name, time.time() - _tf)
 
+    # ------------------------------------------------------------------
+    # Cross-strategy comparison plots + summary table
+    # ------------------------------------------------------------------
+    summary_df = _backtest_comparison(
+        all_perfs=all_perfs,
+        out_dir=config.ROOT_DIR / "outputs" / "figures" / "comparison",
+        rolling_window=config.rolling_window_performance,
+    )
+
+    logger.info("=== Strategy summary ===\n%s", summary_df.to_string())
     logger.info("PHASE 2 — OK  (%.1fs)\n", time.time() - _t)
+    return summary_df
+
+
+def _backtest_comparison(all_perfs: list, out_dir, rolling_window: int) -> pd.DataFrame:
+    """
+    Generate cross-strategy comparison plots and a summary metrics table.
+
+    Parameters
+    ----------
+    all_perfs : list of (name: str, perf: PerformanceAnalyser)
+        Collected from run_backtest_phase(); rolling_metrics must already be computed.
+    out_dir : Path
+        Directory where comparison figures are saved.
+    rolling_window : int
+        Window used to compute rolling metrics (for axis labels).
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary table: strategies as columns, metrics as rows.
+        Includes a "Benchmark" column derived from the first PerformanceAnalyser.
+    """
+    import matplotlib.pyplot as plt
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not all_perfs:
+        return pd.DataFrame()
+
+    names   = [n for n, _ in all_perfs]
+    perfs   = [p for _, p in all_perfs]
+    cmap    = plt.get_cmap("tab10")
+    colors  = [cmap(i / max(len(names), 1)) for i in range(len(names))]
+
+    # ------------------------------------------------------------------
+    # 1. Combined cumulative returns
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for (name, perf), color in zip(all_perfs, colors):
+        cum = perf.cumulative_performance_base_100.squeeze()
+        ax.plot(cum.index, cum.values, label=name, color=color)
+
+    # Benchmark (same series for all strategies — use first)
+    bench_cum = perfs[0].bench_cumulative_perf_base_100
+    if bench_cum is not None:
+        bench_cum = bench_cum.squeeze()
+        ax.plot(bench_cum.index, bench_cum.values,
+                label="Benchmark", color="black", linestyle="--", linewidth=1.5)
+
+    ax.set_title(f"Cumulative Performance — all strategies (base 100)", fontsize=11)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Performance (base 100)")
+    ax.legend(ncol=2, fontsize=8)
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(out_dir / "comparison_cumulative_returns.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # 2. Combined rolling metrics (Sharpe, Return, Vol)
+    # ------------------------------------------------------------------
+    for metric, ylabel in [
+        ("sharpe", f"Rolling Sharpe ({rolling_window}d)"),
+        ("return", f"Rolling Ann. Return ({rolling_window}d)"),
+        ("vol",    f"Rolling Volatility ({rolling_window}d)"),
+    ]:
+        fig, ax = plt.subplots(figsize=(14, 5))
+        for (name, perf), color in zip(all_perfs, colors):
+            series = perf.rolling_metrics[metric].squeeze()
+            ax.plot(series.index, series.values, label=name, color=color)
+
+        bench_rolling = perfs[0].rolling_metrics_bench
+        if bench_rolling is not None:
+            b = bench_rolling[metric].squeeze()
+            ax.plot(b.index, b.values,
+                    label="Benchmark", color="black", linestyle="--", linewidth=1.5)
+
+        ax.set_title(ylabel, fontsize=11)
+        ax.set_xlabel("Date")
+        ax.set_ylabel(ylabel)
+        ax.legend(ncol=2, fontsize=8)
+        ax.grid(True)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"comparison_rolling_{metric}.png", bbox_inches="tight")
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # 3. Summary metrics table
+    # ------------------------------------------------------------------
+    metric_keys = [
+        ("annualized_return",    "Ann. Return"),
+        ("annualized_volatility", "Ann. Vol"),
+        ("annualized_sharpe_ratio", "Sharpe"),
+        ("max_drawdown",         "Max DD"),
+    ]
+    rows = {}
+    for mk, label in metric_keys:
+        row = {name: perf.metrics[mk] for name, perf in all_perfs}
+        # Benchmark column (take scalar from first perf; bench metrics are Series indexed by col name)
+        bench_val = perfs[0].metrics.get(f"{mk}_bench")
+        if bench_val is not None:
+            try:
+                row["Benchmark"] = float(bench_val.iloc[0])
+            except (AttributeError, TypeError):
+                row["Benchmark"] = float(bench_val)
+        rows[label] = row
+
+    summary_df = pd.DataFrame(rows).T
+    summary_df.index.name = "Metric"
+
+    # Save as CSV
+    summary_df.to_csv(out_dir / "comparison_summary.csv")
+
+    # Save as a simple matplotlib table figure
+    fig, ax = plt.subplots(figsize=(max(8, int(len(summary_df.columns) * 1.4) + 1), 2.5))
+    ax.axis("off")
+    tbl = ax.table(
+        cellText=summary_df.applymap(lambda v: f"{v:.3f}" if pd.notna(v) else "—").values,
+        rowLabels=summary_df.index.tolist(),
+        colLabels=summary_df.columns.tolist(),
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1, 1.6)
+    ax.set_title("Strategy comparison — full-period metrics", fontsize=11, pad=12)
+    fig.tight_layout()
+    fig.savefig(out_dir / "comparison_summary_table.png", bbox_inches="tight")
+    plt.close(fig)
+
+    return summary_df
 
 
 # ===========================================================================

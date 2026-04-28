@@ -300,6 +300,7 @@ class Config:
 
         # Feature engineering
         self.load_or_compute_features: str|None = None
+        self.save_features_to_s3: bool = True
         self.rolling_window_quarters: int|None = None
         self.limit_ffill_qdata: int|None = None
         self.merge_asof_tolerance_days: int = 63
@@ -396,14 +397,17 @@ class Config:
 
             # Feature engineering
             if config.get("FEATURE_ENGINEERING") is not None:
-                if config.get("FEATURE_ENGINEERING").get("LOAD_OR_COMPUTE") is not None:
-                    self.load_or_compute_features = config.get("FEATURE_ENGINEERING").get("LOAD_OR_COMPUTE")
-                if config.get("FEATURE_ENGINEERING").get("ROLLING_WINDOW_QUARTERS") is not None:
-                    self.rolling_window_quarters = config.get("FEATURE_ENGINEERING").get("ROLLING_WINDOW_QUARTERS")
-                if config.get("FEATURE_ENGINEERING").get("LIMIT_FFILL_QDATA") is not None:
-                    self.limit_ffill_qdata = config.get("FEATURE_ENGINEERING").get("LIMIT_FFILL_QDATA")
-                if config.get("FEATURE_ENGINEERING").get("MERGE_ASOF_TOLERANCE_DAYS") is not None:
-                    self.merge_asof_tolerance_days = config.get("FEATURE_ENGINEERING").get("MERGE_ASOF_TOLERANCE_DAYS")
+                fe = config.get("FEATURE_ENGINEERING")
+                if fe.get("LOAD_OR_COMPUTE") is not None:
+                    self.load_or_compute_features = fe.get("LOAD_OR_COMPUTE")
+                if "SAVE_TO_S3" in fe:
+                    self.save_features_to_s3 = bool(fe.get("SAVE_TO_S3"))
+                if fe.get("ROLLING_WINDOW_QUARTERS") is not None:
+                    self.rolling_window_quarters = fe.get("ROLLING_WINDOW_QUARTERS")
+                if fe.get("LIMIT_FFILL_QDATA") is not None:
+                    self.limit_ffill_qdata = fe.get("LIMIT_FFILL_QDATA")
+                if fe.get("MERGE_ASOF_TOLERANCE_DAYS") is not None:
+                    self.merge_asof_tolerance_days = fe.get("MERGE_ASOF_TOLERANCE_DAYS")
 
             # Backtest
             if config.get("BACKTEST") is not None:
