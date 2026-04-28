@@ -50,7 +50,7 @@ asset_returns   = data_manager.get_asset_returns()
 benchmark       = data_manager.get_benchmark_returns()
 rf              = data_manager.get_rf_returns()
 mapping_df      = data_manager.mapping_df
-transcripts_df  = data_manager._get_formatted_unprocessed_transcripts()
+transcripts_df  = data_manager.get_formatted_unprocessed_transcripts()
 
 # --- Sanity checks ---
 assert asset_returns is not None,  "asset_returns is None"
@@ -149,7 +149,7 @@ _t2 = time.time()
 
 from nlp_quant_strat.forecasting.embeddings import SentenceTransformerBuilder, TFIDFBuilder
 
-preprocessed_transcripts_df = data_manager._get_formatted_preprocessed_transcripts()
+preprocessed_transcripts_df = data_manager.get_formatted_preprocessed_transcripts()
 logger.info("preprocessed_transcripts_df : %d rows | columns: %s",
             len(preprocessed_transcripts_df), list(preprocessed_transcripts_df.columns))
 
