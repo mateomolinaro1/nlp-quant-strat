@@ -494,5 +494,5 @@ def _backtest_comparison(all_perfs: list, out_dir, rolling_window: int) -> pd.Da
 
 if __name__ == "__main__":
     forecasting_result = run_forecasting_phase()
-    run_backtest_phase()
+    # run_backtest_phase()
     logger.info("Pipeline complete  (total: %.1fs)", time.time() - _t_start)
