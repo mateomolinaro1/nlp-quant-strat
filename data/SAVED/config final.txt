@@ -1,0 +1,131 @@
+{
+  "AWS": {
+    "S3": {
+      "BUCKET_NAME": "nlp-quant-strat",
+      "AWS_DEFAULT_REGION": "eu-north-1",
+      "OUTPUT_FORMAT": "json",
+      "FILENAMES_TO_LOAD": [
+        "data/market/risk_free_returns.parquet",
+        "data/market/riy_asset_returns.parquet",
+        "data/market/riy_index_constituents.parquet",
+        "data/market/russell_returns.parquet",
+        "data/transcripts/formatted_unprocessed_transcripts.parquet",
+        "data/transcripts/formatted_preprocessed_transcripts.parquet",
+        "data/others/words_dict.parquet"
+      ],
+      "FILENAMES_NOT_TO_ALIGN": [
+        "data/market/riy_index_constituents.parquet",
+        "data/transcripts/formatted_unprocessed_transcripts.parquet",
+        "data/transcripts/formatted_preprocessed_transcripts.parquet",
+        "data/others/words_dict.parquet"
+      ],
+      "DATES_FILENAME": "data/market/riy_asset_returns.parquet",
+      "BENCHMARK_RETURNS_FILENAME": "data/market/russell_returns.parquet",
+      "WHICH_BENCH_COL_TO_KEEP": "Russell 1000",
+      "TRANSCRIPTS_FILENAME": "data/transcripts/formatted_unprocessed_transcripts.parquet",
+      "PREPROCESSED_TRANSCRIPTS_FILENAME": "data/transcripts/formatted_preprocessed_transcripts.parquet",
+      "RF_RETURNS_FILENAME": "data/market/risk_free_returns.parquet"
+    }
+  },
+  "DATA": {
+    "MARKET_DATA_FREQUENCY": "d",
+    "NAN_POLICY": {
+      "risk_free_returns": {"method": "ffill", "limit": 5},
+      "riy_asset_returns": {"method": "none"},
+      "russell_returns": {"method": "ffill", "limit": 5}
+    }
+  },
+  "FEATURE_ENGINEERING": {
+    "LOAD_OR_COMPUTE": "load",
+    "SAVE_TO_S3": false,
+    "ROLLING_WINDOW_QUARTERS": 4,
+    "LIMIT_FFILL_QDATA": 92,
+    "MERGE_ASOF_TOLERANCE_DAYS": 63
+  },
+  "EMBEDDINGS": {
+    "LOAD_OR_COMPUTE": "load",
+    "S3_CACHE_PREFIX": "data/embeddings",
+    "SENTENCE_TRANSFORMER": {
+      "MODEL_NAME": "all-MiniLM-L6-v2",
+      "CHUNK_SIZE": 256,
+      "BATCH_SIZE": 32,
+      "TEXT_COLUMN": "transcript"
+    },
+    "TFIDF": {
+      "MAX_FEATURES": 200,
+      "NGRAM_RANGE": [1, 2],
+      "TEXT_COLUMN": "transcript_cleaned"
+    }
+  },
+  "FEATURE_SET": {
+    "MODE": ["sentiment", "tfidf_sentiment", "st_sentiment"]
+  },
+  "FORECASTING": {
+    "BETA_WINDOW": 252,
+    "HORIZONS": [1, 3, 5, 21],
+    "REFIT_FREQUENCY": "Q",
+    "TRAIN_WINDOW": null,
+    "VAL_WINDOW": 1,
+    "MIN_TRAIN_PERIODS": 8,
+    "MIN_TRAIN_EVENTS": 50,
+    "MIN_VAL_EVENTS": 5,
+    "MODELS": [
+      {
+        "name": "ridge",
+        "class": "Ridge",
+        "init_params": {},
+        "param_grid": [
+          {"alpha": 0.1},
+          {"alpha": 1.0}
+        ]
+      },
+      {
+        "name": "lasso",
+        "class": "Lasso",
+        "init_params": {"max_iter": 500},
+        "param_grid": [
+          {"alpha": 0.1},
+          {"alpha": 1.0}
+        ]
+      },
+      {
+        "name": "rf",
+        "class": "RandomForestRegressor",
+        "init_params": {"random_state": 42, "n_jobs": -1},
+        "param_grid": [
+          {"n_estimators": 100, "max_depth": 3},
+          {"n_estimators": 100, "max_depth": 5}
+        ]
+      },
+      {
+        "name": "gbr",
+        "class": "GradientBoostingRegressor",
+        "init_params": {"random_state": 42},
+        "param_grid": [
+          {"n_estimators": 100, "max_depth": 3, "learning_rate": 0.1},
+          {"n_estimators": 100, "max_depth": 5, "learning_rate": 0.1}
+        ]
+      }
+    ]
+  },
+
+  "BACKTEST": {
+    "PERCENTILES_WINSORIZATION": [2, 98],
+    "PERCENTILES_PORTFOLIOS": [20, 80],
+    "INDUSTRY_SEGMENTATION": "",
+    "REBAL_PERIODS": 66,
+    "PORTFOLIO_TYPE": "long_only",
+    "TRANSACTION_COSTS_BPS": 10
+  },
+
+  "CV_RESULTS": {
+    "SAVE_RESULTS": true,
+    "LOAD_OR_COMPUTE": "compute",
+    "S3_PREFIX": "data/cv_results",
+    "N_JOBS": -1
+  },
+
+  "OUTPUTS": {
+    "ROLLING_WINDOW_PERFORMANCE": 252
+  }
+}
