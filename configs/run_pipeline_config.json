@@ -119,8 +119,8 @@
   },
 
   "CV_RESULTS": {
-    "SAVE_RESULTS": true,
-    "LOAD_OR_COMPUTE": "compute",
+    "SAVE_RESULTS": false,
+    "LOAD_OR_COMPUTE": "load",
     "S3_PREFIX": "data/cv_results",
     "N_JOBS": -1
   },

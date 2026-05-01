@@ -471,7 +471,7 @@ def _backtest_comparison(all_perfs: list, out_dir, rolling_window: int) -> pd.Da
     fig, ax = plt.subplots(figsize=(max(8, int(len(summary_df.columns) * 1.4) + 1), 2.5))
     ax.axis("off")
     tbl = ax.table(
-        cellText=summary_df.applymap(lambda v: f"{v:.3f}" if pd.notna(v) else "—").values,
+        cellText=summary_df.map(lambda v: f"{v:.3f}" if pd.notna(v) else "—").values,
         rowLabels=summary_df.index.tolist(),
         colLabels=summary_df.columns.tolist(),
         loc="center",
@@ -494,5 +494,5 @@ def _backtest_comparison(all_perfs: list, out_dir, rolling_window: int) -> pd.Da
 
 if __name__ == "__main__":
     forecasting_result = run_forecasting_phase()
-    # run_backtest_phase()
+    run_backtest_phase()
     logger.info("Pipeline complete  (total: %.1fs)", time.time() - _t_start)
