@@ -41,15 +41,19 @@ class DataManager:
             name = Path(filename).stem
             logger.info(f"Loading {filename}...")
             
+            # 1. Load the file normally (no 'columns' arg to avoid TypeError)
             obj = self.aws.s3.load(key=filename)
             
-            # --- MODIFICATION ICI ---
+            # 2. If it's the transcript file, strip the heavy text IMMEDIATELY
             if name == transcript_attr:
-                logger.info(f"Optimisation : On supprime la colonne texte pour sauver la RAM")
-                # On ne garde que les colonnes de mapping (date, ticker, asset)
-                columns_to_keep = [c for c in obj.columns if c != 'transcript']
-                obj = obj[columns_to_keep]
-            # --------------------------
+                logger.info("Transcript file detected. Stripping text to save RAM...")
+                if 'transcript' in obj.columns:
+                    # We drop the heavy text column right here
+                    obj.drop(columns=['transcript'], inplace=True)
+                
+                # Force Python to release the memory of the dropped text
+                import gc
+                gc.collect()
 
             setattr(self, name, obj)
 
@@ -57,6 +61,8 @@ class DataManager:
         self._set_asset_ids()
         self._build_mapping()
         self._format_benchmark_data()
+        self._align_to_dates()
+        self._handle_nan_policy()
 
     # ---------- Internal helpers ---------- #
     def _init_s3(self) -> None:
@@ -109,12 +115,29 @@ class DataManager:
         asset_returns_obj = getattr(self, attr_name)
         return asset_returns_obj
 
+    def get_rf_returns(self) -> pd.DataFrame:
+        """
+        helper to get the risk-free returns dataframe from the corresponding attribute, which is named after the
+        filename specified in the config. This is to avoid hardcoding attribute names and to ensure consistency with
+        the config.
+        """
+        filename = self.config.rf_returns_filename
+        attr_name = Path(filename).stem
+
+        if not hasattr(self, attr_name):
+            raise AttributeError(f"Attribute '{attr_name}' not found. Did you load the data?")
+
+        asset_returns_obj = getattr(self, attr_name)
+        return asset_returns_obj
+
     def _format_benchmark_data(self) -> None:
         """
         Format (compute returns and align dates) the benchmark data to have the same structure as the asset returns
         data.
         """
         benchmark_returns = self.get_benchmark_returns()
+        if self.config.which_bench_col_to_keep is not None:
+            benchmark_returns = benchmark_returns[[self.config.which_bench_col_to_keep]]
         benchmark_returns.ffill(inplace=True, limit=1)
         benchmark_returns = benchmark_returns.pct_change(fill_method=None)
         asset_returns = self.get_asset_returns()
@@ -131,7 +154,36 @@ class DataManager:
         setattr(self, Path(self.config.benchmark_returns_filename).stem, final_df)
         return
 
-    def _get_formatted_unprocessed_transcripts(self) -> pd.DataFrame:
+    def _align_to_dates(self) -> None:
+        """Reindex all date-indexed DataFrames to self.dates, forward-filling gaps."""
+        dates_index = pd.Index(self.dates)
+        for attr in self._data_attrs:
+            not_to_align = [p.split("/")[-1].split(".")[0] for p in self.config.filenames_not_to_align]
+            if attr in not_to_align:  # skip non-date-indexed df
+                continue
+            obj = getattr(self, attr)
+            if not isinstance(obj, pd.DataFrame):
+                continue
+            if not isinstance(obj.index, pd.DatetimeIndex):
+                continue
+            if obj.index.duplicated().any():
+                obj = obj[~obj.index.duplicated(keep='last')]
+            setattr(self, attr, obj.reindex(dates_index))
+
+    def _handle_nan_policy(self) -> None:
+        """Apply per-file NaN handling policy defined in config.nan_policy."""
+        if self.config.nan_policy is None:
+            return
+        for attr, policy in self.config.nan_policy.items():
+            obj = getattr(self, attr, None)
+            if obj is None or not isinstance(obj, pd.DataFrame):
+                continue
+            method = policy.get("method", "none")
+            if method == "ffill":
+                limit = policy.get("limit", None)
+                setattr(self, attr, obj.ffill(limit=limit))
+
+    def get_formatted_unprocessed_transcripts(self) -> pd.DataFrame:
         filename = self.config.formatted_unprocessed_transcripts_filename
         attr_name = Path(filename).stem
 
@@ -140,6 +192,16 @@ class DataManager:
 
         formatted_unprocessed_transcripts_obj = getattr(self, attr_name)
         return formatted_unprocessed_transcripts_obj
+
+    def get_formatted_preprocessed_transcripts(self) -> pd.DataFrame:
+        filename = self.config.formatted_preprocessed_transcripts_filename
+        attr_name = Path(filename).stem
+
+        if not hasattr(self, attr_name):
+            raise AttributeError(f"Attribute '{attr_name}' not found. Did you load the data?")
+
+        formatted_preprocessed_transcripts_obj = getattr(self, attr_name)
+        return formatted_preprocessed_transcripts_obj
 
     def _set_dates(self) -> None:
         """
@@ -174,7 +236,7 @@ class DataManager:
         """
 
         # 1️ prepare transcripts
-        df_transcripts = self._get_formatted_unprocessed_transcripts()
+        df_transcripts = self.get_formatted_unprocessed_transcripts()
         df_transcripts = df_transcripts.reset_index()
         df_transcripts = df_transcripts.rename(columns={'ticker_api': 'ticker'})
         df_transcripts['filing_date'] = pd.to_datetime(df_transcripts['filing_date'])
@@ -203,4 +265,41 @@ class DataManager:
         )
         df_mapped.dropna(subset="asset", inplace=True)
         df_mapped.reset_index(drop=True, inplace=True)
+        # delete duplicates
+        df_mapped = df_mapped[~df_mapped.duplicated(subset=["filing_date", "asset"], keep="last")]
         self.mapping_df = df_mapped
+
+    def release_mapping_texts(self) -> None:
+        """Drop transcript text columns from mapping_df to free RAM. Call after feature engineering."""
+        if self.mapping_df is None:
+            return
+        text_cols = [c for c in self.mapping_df.columns if c in ("transcript", "transcript_cleaned")]
+        if text_cols:
+            self.mapping_df.drop(columns=text_cols, inplace=True)
+            logger.info("Released text columns %s from mapping_df.", text_cols)
+
+    def release_transcripts(self) -> None:
+        """Set transcript DataFrame attributes to None to free RAM. Call after embeddings are built."""
+        for filename in filter(None, [
+            self.config.formatted_unprocessed_transcripts_filename,
+            self.config.formatted_preprocessed_transcripts_filename,
+        ]):
+            attr = Path(filename).stem
+            if getattr(self, attr, None) is not None:
+                setattr(self, attr, None)
+                logger.info("Released '%s' from memory.", attr)
+
+    def get_fundamentals(self) -> pd.DataFrame | None:
+        """Retrieves fundamentals based on the FUNDAMENTALS_FILENAME in config."""
+        # This gets 'fundamentals' from 'data/market/fundamentals.parquet'
+        attr_name = Path(self.config.fundamentals_filename).stem
+
+        if hasattr(self, attr_name):
+            df = getattr(self, attr_name)
+            if df is not None:
+                # Standardize date for merge_asof
+                df['filing_date'] = pd.to_datetime(df['filing_date'])
+                return df
+
+        logger.warning("Fundamentals data not found in DataManager attributes.")
+        return None

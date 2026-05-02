@@ -1,0 +1,417 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{adjustbox}
+\usepackage{float}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{placeins}
+\usepackage{amsmath}
+\usepackage{rotating}
+\usepackage{siunitx}
+\usepackage[a4paper, left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm]{geometry}
+\usepackage{longtable}
+\usepackage{comment}
+\usepackage{graphicx}
+
+
+\title{Dynamic Allocation Macro Factor-Mimicking Portfolios}
+\author{Matéo Molinaro \and Lucien Chaudron}
+\date{27 January 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper investigates whether macroeconomic information can be effectively translated into investment strategies through the use of macro factor-mimicking portfolios and predictive modeling. We focus on inflation as a representative macroeconomic variable and construct tradable portfolios that replicate inflation exposure by estimating stock-level sensitivities and forming long--short factor-mimicking portfolios. Building on this framework, we employ a range of statistical and machine-learning models to forecast inflation dynamics using a large macroeconomic dataset. These forecasts are then used to implement a dynamic asset allocation strategy that adjusts portfolio exposures in response to predicted macroeconomic conditions. We evaluate the performance of the proposed strategy in terms of return, risk, and risk-adjusted metrics, and compare it to static benchmark allocations. Our results provide evidence on the economic value of combining macro factor-mimicking portfolios with forecasting techniques for dynamic portfolio management.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Understanding and exploiting the relationship between macroeconomic conditions and asset price dynamics remains a central challenge in portfolio management. Macroeconomic variables such as inflation, interest rates, and business cycle indicators are widely recognized as key drivers of financial markets. However, these variables are not directly tradable and are difficult to incorporate in a systematic and operational manner into portfolio construction.\\
+
+This project aims to address this challenge by combining macro factor-mimicking portfolios, macroeconomic forecasting, and dynamic asset allocation. We construct tradable portfolios whose returns are explicitly exposed to the dynamics of inflation. These portfolios serve as investable proxies for macroeconomic risks and provide a bridge between macroeconomic information and portfolio decisions. The analysis is organized into three main steps.\\
+
+First, we construct macro factor-mimicking portfolios (FMPs) for inflation. Building on the methodology proposed by Mikheil Esakia and Felix Goltz (2023)[1], we estimate stock-level sensitivities to inflation. At each rebalancing date, we form a long–short portfolio by taking long positions in the top 10\% and short positions in the bottom 10\% of stocks ranked by their estimated inflation betas. This step provides a tradable representation of inflation risk.\\
+
+Second, we model and forecast the dynamics of inflation. We employ a range of statistical and machine-learning techniques to predict future inflation using a broad information set consisting of 125 macroeconomic variables from the FRED-MD dataset. These models aim to capture both linear and non-linear relationships between macroeconomic indicators and inflation dynamics.\\
+
+Third, we use these inflation forecasts to implement a dynamic asset allocation strategy. Portfolio weights are adjusted over time in response to the predicted evolution of inflation, with the objective of increasing exposure during favorable macroeconomic regimes and reducing exposure during adverse conditions.\\
+
+Overall, this project investigates whether macro factor-mimicking portfolios, here applied to inflation, but extendable to any macroeconomic variable in the FRED-MD dataset, combined with predictive modeling, can be effectively leveraged to design dynamic allocation strategies that outperform static investment approaches.
+
+
+\section{Factor Mimicking Portfolios (FMP)}
+
+This section describes the methodology used to estimate the relationship between tradable equity returns and macroeconomic indicators, and to construct macro factor-mimicking portfolios.
+
+\subsection{Data}
+
+The empirical analysis relies on monthly data spanning January 1970 to December 2024. Equity prices and returns are obtained from the Center for Research in Security Prices (CRSP) and include all ordinary common shares listed on the NYSE, AMEX, and NASDAQ. The investment universe is restricted to the top 1{,}000 firms ranked by market capitalization at each date. Macroeconomic variables are sourced from the FRED-MD dataset. Our code is available on GitHub \footnote{\url{https://github.com/mateomolinaro1/dynamic-allocation-macro-fmp/tree/master}}
+
+\subsection{Methodology}
+
+\subsubsection{Measuring stock-level inflation exposure}
+
+Following Esakia and Goltz (2023), macroeconomic exposures are estimated at the individual stock level while explicitly controlling for market risk. The objective is to capture heterogeneity in firms’ sensitivities to macroeconomic shocks without inducing unintended exposure to the aggregate equity market. For each stock $i$, we estimate the following bivariate regression:
+\begin{equation}
+R_{i,t} - R_{f,t}
+= \alpha_i
++ \beta^{\text{MKT}}_i \left( R^{\text{MKT}}_t - R_{f,t} \right)
++ \beta^{\text{macro}}_i \left( \text{Macro}_t - \mathbb{E}[\text{Macro}_t \mid t-1] \right)
++ \varepsilon_{i,t},
+\end{equation}
+where $R_{i,t}$ denotes the return on stock $i$, $R_{f,t}$ is the risk-free rate (assumed to be zero in this study), $R^{\text{MKT}}_t$ represents the market return, proxied by an equally weighted portfolio of all available stocks, and $\text{Macro}_t - \mathbb{E}[\text{Macro}_t \mid t-1]$ captures innovations in the macroeconomic variable of interest.
+
+\noindent To improve out-of-sample reliability, several statistical adjustments are implemented. First, to balance estimation precision with time variation in macro exposures, parameters are estimated using weighted least squares with exponentially decaying weights:
+\begin{equation}
+\min_{\{\alpha_i,\beta_i\}}
+\sum_{t=1}^{T} \varepsilon_{i,t}^2
+\times \exp\!\left(-|T-t| \frac{\ln(2)}{60}\right),
+\end{equation}
+which assigns half of the total weight to the most recent five years of observations while retaining information from longer historical samples.
+
+\noindent Second, estimation risk is explicitly addressed through Bayesian shrinkage following Vasicek (1973). The final macro exposure is obtained as a weighted average of the time-series estimate and a cross-sectional prior:
+\begin{equation}
+\beta^{\text{final}}_i
+=
+\beta^{\text{prior}}_i
+\frac{\sigma^2_{i,\text{TS}}}{\sigma^2_{i,\text{TS}} + \sigma^2_{\text{XS}}}
++
+\beta^{\text{estimate}}_i
+\left(
+1 -
+\frac{\sigma^2_{i,\text{TS}}}{\sigma^2_{i,\text{TS}} + \sigma^2_{\text{XS}}}
+\right),
+\end{equation}
+where $\sigma^2_{i,\text{TS}}$ denotes the time-series sampling variance of the estimated beta and $\sigma^2_{\text{XS}}$ the cross-sectional variance across stocks. This shrinkage mechanism assigns less weight to imprecisely estimated exposures and improves the stability of macro betas.
+
+\subsubsection{Construction of factor-mimicking portfolios}
+
+The estimated stock-level macro exposures are then used to construct macro factor-mimicking portfolios, which serve as tradable building blocks for dynamic asset allocation. At each monthly rebalancing date, stocks are sorted based on their Bayesian macro betas. The long leg of the inflation FMP consists of the top 10\% of stocks with the highest estimated exposures, while the short leg includes the bottom 10\%.
+
+\noindent Prior to portfolio formation, Bayesian betas are standardized cross-sectionally using z-scores and winsorized at the 2nd and 98th percentiles to mitigate the impact of extreme values. Transaction costs are not incorporated at the FMP construction stage, as the dynamic allocation strategy can directly trades the assets rather than factor-mimicking portfolios. Transaction costs of 10 basis points are, however, explicitly accounted for in the dynamic allocation phase.
+
+\subsection{Results}
+
+Figure \ref{fig:bayesian_betas_distribution} shows the cross-sectional distribution of Bayesian inflation betas across all stocks and time periods. The distribution is centered close to zero but exhibits substantial dispersion, indicating meaningful heterogeneity in firms’ inflation exposure. This heterogeneity provides scope for constructing long–short factor-mimicking portfolios. Note that the spikes at the tails are artificial as they reflect the fact that we winsorized/clipped the results for illustrative purpose.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{FMP/bayesian_betas_distribution.PNG}
+    \caption{Distribution of the stock-level Bayesian betas across time.}
+    \label{fig:bayesian_betas_distribution}
+\end{figure}
+
+
+Figure \ref{fig:bayesian_betas_overtime} illustrates the evolution over time of the cross-sectional mean, as well as the 10th and 90th percentiles, of Bayesian inflation betas. While the average exposure remains relatively stable, the dispersion varies over time, increasing during certain macroeconomic regimes. This time variation highlights the importance of allowing macro sensitivities to evolve rather than assuming constant exposures.
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{FMP/bayesian_betas_overtime.PNG}
+    \caption{Time-series dynamics of the cross-sectional average as well as 10-90 percentiles.}
+    \label{fig:bayesian_betas_overtime}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.35\textwidth]{FMP/bayesian_vs_non_bayesian_betas_summary.PNG}
+    \caption{Summary statistics comparison between Bayesian an non-bayesian betas across stocks and time.}
+    \label{fig:bayesian_vs_non_bayesian_betas_summary}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{FMP/proportion_significant_bayesian_betas_overtime.png}
+    \caption{Proportion of significant (alpha=0.05, using Newey-West standard errors correction) Bayesian betas overtime.}
+    \label{fig:proportion_significant_bayesian_betas_overtime}
+\end{figure}
+
+Figure \ref{fig:proportion_significant_bayesian_betas_overtime} reports the proportion of stocks with statistically significant inflation betas at the 5\% level, using Newey–West corrected standard errors. The proportion fluctuates over time and increases during certain macroeconomic episodes, suggesting that inflation exposure becomes more economically relevant in specific regimes rather than uniformly across the sample.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{FMP/rsquared_overtime.png}
+    \caption{Rsquared (average, 10 and 90 percentiles) overtime from the bivariate linear regression}
+    \label{fig:rsquared_overtime}
+\end{figure}
+
+Figure \ref{fig:rsquared_overtime} displays the explanatory power of the bivariate regression model over time. While average R-squared values remain modest, the upper tail indicates that for a subset of firms, inflation innovations contribute meaningfully to return variation.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.30\textwidth]{FMP/rsquared_summary.png}
+    \caption{Summary statistics of Rsquared from the bivariate linear regression}
+    \label{fig:rsquared_summary}
+\end{figure}
+
+Consistent with the time-series evidence, Figure \ref{fig:rsquared_summary} confirms that the regression model explains a limited but non-negligible fraction of return variation. The results align with the view that macroeconomic variables are not dominant drivers of returns but can still be exploited in cross-sectional portfolio construction.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{FMP/fmp_equity_curves.png}
+    \caption{Equity Curve of inflation-FMP long and short leg.}
+    \label{fig:fmp_equity_curves}
+\end{figure}
+
+Figure \ref{fig:fmp_equity_curves} plots the equity curve (cumulative sum of the returns) of the long and short legs of the inflation factor-mimicking portfolio.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.80\textwidth]{FMP/fmp_performance_summary.png}
+    \caption{Performance metrics of inflation-FMP and Benchmark (EW).}
+    \label{fig:fmp_performance_summary}
+\end{figure}
+
+\section{Inflation Forecasting}
+
+This section details our approach regarding inflation forecasting using machine learning methods.
+
+\subsection{Data}
+
+Our analysis uses the 2024-12 FRED-MD dataset, which is a large macroeconomic database compiled by the Federal Reserve Bank of St. Louis and designed for empirical macroeconomic and financial research. It contains over 125 monthly U.S. macroeconomic time series starting from January 1959, and integrates transformation codes to ensure sationarity and comparability across series. The dataset is carefully curated, with standardized transformations applied to ensure stationarity and comparability across series.
+
+\subsection{Methodology}
+
+Building on Naghi et. al. (2024), we consider and compare several types of machine learning models (OLS, Lasso, Ridge, Elastic Net, Random Forest, Gradient Boosting, SVR, Feed-forward Neural Network, LightGBM and XGBoost) with different hyperparameter configurations (hyperparameters grid in the appendix). The following steps detail the different steps used in the ML pipeline.
+
+\subsubsection{Preprocessing}
+
+In order to build usable inputs, each variable is transformed according to its predefined transformation code (levels, differences, log-differences, or growth rates) to ensure appropriate scaling and stationarity. Observations (date) with missing values are removed, and the data are finally split into predictors and targets, where the target macroeconomic variable is the 1-month ahead CPIAUCSL ($h = 1$ forecasting horizon).
+
+\subsubsection{Regularization}
+
+To ensure frugal models and mitigate risks of overfitting, we implemented a regularization procedure using PCA paired with a walk-forward cross-validation framework for optimal out-of-sample (OOS) hyperparameter tuning. Additionaly, even though time-constraints prevented us from using them, we also implemented features selectors from the Nowcasting Toolbox, namely a Lasso, Lars, a T-Stat and a correlation selector.
+
+
+\subsubsection{Factor extraction}
+
+Additionally, we implemented two factor extracting methods to further reduce model size. The first one is a Principal Component Analysis method, the second one is a Dynamic Factor Model (which can also be used to forecast). However, due to time running short, we used only the PCA approach (as DFMs are time-intensive). Hence, we will observe the results for 20 models: 10 using the 125 variables as inputs, and the same 10 models but using 12 principal components (PCs) extracted with PCA. Although choosing the optimal number of PCs can be seen as an additionnal hyperparamter, we considered here 12 PCs as we have a 12-month validation window. We leave the number of PCs to enter the hyperparameter tuning validation for further research.
+
+\subsubsection{Estimated models}
+
+We considered the following models :
+
+\begin{table}[ht]
+\centering
+\caption{Forecasting Models by Methodological Category}
+\label{tab:models}
+\begin{tabular}{ll}
+\hline
+\textbf{Model Category} & \textbf{Models} \\
+\hline
+Linear Models
+& Ordinary Least Squares (OLS) \\
+
+Regularized Linear Models
+& Ridge Regression, Lasso Regression, Elastic Net \\
+
+Tree-Based Ensemble Methods
+& Random Forest, Gradient Boosting, XGBoost, LightGBM \\
+
+Kernel-Based Methods
+& Support Vector Regression (SVR) \\
+
+Neural Network Models
+& Feedforward Neural Network (MLP) \\
+
+\hline
+\end{tabular}
+\end{table}
+
+
+
+\subsubsection{Expanding walk-forward cross-validation framework}
+
+We implement an expanding window walk-forward framework to evaluate the out-of-sample forecasting performance of the models. At each point in time, models are trained on an expanding sample that starts from an initial minimum number of observations (252) and grows as new data become available. For each re-estimation date, the available training sample is split into a training and a validation subsample, which is used to perform a grid search over hyperparameters that are specific to each model. Hyperparameters selection is based on average validation (RMSE) performance over the validation window. Once the optimal hyperparameters are identified, each model is re-estimated on the full sample up to the end of the validation period and used to generate a one-step-ahead out-of-sample forecast. This walk-forward procedure is repeated over time, ensuring that forecasts are strictly out-of-sample and actualization of model parameters and hyperparameters. See Figure \ref{fig:wkfwd} for a visual representation of our training scheme.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{Forecasting/expanding_walk_forward_cv.jpg}
+    \caption{Expanding walk-forward framework}
+    \label{fig:wkfwd}
+\end{figure}
+\FloatBarrier
+
+\subsubsection{Results}
+
+The results for numeric hyperparameter tuning are presented in Table \ref{fig:mean_parameters}. The graphs displays a fluctuating settings for every hyperparameters, suggesting each time period evaluation came with specific variable relations, pressing the need for model adaptation. This behavior might also be favored by our considered hyperparameters that were also limited in quantitity and spaced out (due to computation reasons). Overall, this finding motivates the use of adaptive walk-forward estimation rather than fixed-parameter models.\\
+
+\noindent With the selected hyperparameters, our models performances are summarized in Table \ref{fig:oos_rmse_all_models_overtime} for the RMSE over time and in Table \ref{fig:oos_rmse_all_models} for the mean baseline RMSE. The results point out that, while relatively close in absolute differences, some models outperform (but to assess if the difference is statistically significant, a Diebold-Mariano test should be used) the other ones both overtime and in baseline mean RMSE, namely the Random Forest (both with and without a PCA factor extractor implementation), and severall other tree-based approaches (XGBoost and LightGBM). Penalized linear approaches (Lasso and PCA Lasso) also perform well, achieving predicting power thanks to regularization (compared to OLS). Similarly, the Elastic-Net approach (both with and without PCA) displays better predictive power than the lot of our benchmarked models. Howerver, Table \ref{fig:oos_accuracy_all_models} reports the proportion of correct sign predictions by our considered models. Several models achieve sign accuracy above 50\%, but not the models with the smallest RMSE. This apparent contradiction can arise when a model produces forecasts that are very close to zero and minimize squared errors on average, while occasionally predicting the wrong direction of change. In such cases, small but systematically mis-signed forecasts are penalized only mildly by the RMSE, yet they count fully as errors in terms of directional accuracy. By contrast, models with larger forecast variance may correctly capture the direction of movements more often but incur higher squared errors when the magnitude of deviations is large. As a result, minimizing RMSE may favor conservative, low-volatility forecasts at the expense of correctly predicting the sign of the underlying variable.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{Forecasting/best_hyperparams_all_models_overtime.png}
+    \caption{Time-varying optimal hyperparameters (numeric only) for each model}
+    \label{fig:best_hyperparams_all_models_overtime}
+\end{figure}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.65\linewidth]{Forecasting/mean_parameters.png}
+    \caption{Time-series average coefficients for non-PCA linear models}
+    \label{fig:mean_parameters}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{Forecasting/oos_rmse_all_models_overtime.png}
+    \caption{12-months rolling OOS RMSE per model}
+    \label{fig:oos_rmse_all_models_overtime}
+\end{figure}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.35\linewidth]{Forecasting/oos_rmse_all_models.png}
+    \caption{Time-series average of OOS RMSE per model}
+    \label{fig:oos_rmse_all_models}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.35\linewidth]{Forecasting/oos_sign_accuracy_all_models.png}
+    \caption{Time-series average of OOS sign accuracy per model}
+    \label{fig:oos_accuracy_all_models}
+\end{figure}
+
+\section{Dynamic Allocation FMP}
+\subsection{Methodology}
+The different dynamic allocation strategies consist of going long the high-betas inflation-FMP leg if the forecast produced by the model is of positive sign, going long the low-betas inflation-FMP leg if the forecast is negative and going long the benchmark (Long-Only Equally-Weighted) when the forecast is 0.0.
+
+\subsection{Results}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{DynamicAllocation/dynamic_allocation_cum_returns.png}
+    \caption{Cumulative Returns of dynamic allocation strategies}
+    \label{fig:dynamic_allocation_cum_returns}
+\end{figure}
+\FloatBarrier
+
+Figure \ref{fig:dynamic_allocation_cum_returns} shows the cumulative performance of dynamic allocation strategies driven by inflation forecasts. Several strategies outperform static benchmarks, demonstrating that macro forecasts combined with factor-mimicking portfolios can be translated into economically valuable allocation rules.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.65\linewidth]{DynamicAllocation/performance_table.png}
+    \caption{Performance metrics of the dynamic allocation startegies}
+    \label{fig:performance_table}
+\end{figure}
+\FloatBarrier
+
+The performance table of Figure \ref{fig:performance_table} highlights improvements in risk-adjusted returns for selected dynamic strategies relative to benchmarks. Gains are driven not only by higher returns but also by improved drawdown control, confirming the diversification and timing benefits of the approach.
+
+\section{Conclusion}
+
+This paper examines whether macroeconomic information can be effectively incorporated into investment strategies through macro factor-mimicking portfolios and predictive modeling. Focusing on inflation, we construct tradable factor-mimicking portfolios based on stock-level macro sensitivities and use machine learning methods to forecast inflation dynamics from a large macroeconomic information set.
+
+Our results show that inflation exposure varies substantially across assets and over time, validating the construction of long–short factor-mimicking portfolios. Forecasting performance varies across models, with nonlinear and tree-based methods outperforming linear benchmarks in out-of-sample RMSE, whilst being less proficient in sign accuracy.
+
+When embedded into a dynamic allocation framework, inflation forecasts generate strategies that outperform static benchmarks on both return and risk-adjusted bases. The results suggest that macro factor-mimicking portfolios provide an effective bridge between macroeconomic forecasting and portfolio management.
+
+Overall, this study provides empirical evidence that combining macroeconomic forecasts with tradable macro proxies can enhance dynamic asset allocation. Future research could extend this framework to additional macroeconomic variables, alternative forecasting horizons or multi-factor allocation schemes.
+
+
+\begin{thebibliography}{99}
+
+\bibitem{fmp}
+Esakia, M., \& Goltz, F. (2023). Targeting Macroeconomic Exposures in Equity Portfolios: A Firm-Level Measurement Approach for Out-of-Sample Robustness. \textit{Financial Analysts Journal}. https://doi.org/10.1080/0015198X.2022.2150500
+
+\bibitem{bayesian_shrinkage}
+Vasicek, O. A. 1973. “A Note on Using Cross-Sectional Information in Bayesian Estimation of Security Betas.” \textit{The Journal of Finance}.  doi:10.1111/j.1540-6261.1973.tb01452.x.
+
+\bibitem{benefits_ml}
+Naghi, Andrea A.; O'Neill, Eoghan; Zaharieva, Martina D. (2023): The benefits of forecasting inflation with machine learning: New evidence. \textit{Journal of Applied Econometrics.} https://doi.org/10.15456/jae.2023340.1218742483
+
+\end{thebibliography}
+
+\newpage
+
+\section{Appendix}
+\subsection{Hyperparameter Grids}
+\label{sec:hyperparams_grid}
+
+Table~\ref{tab:hyperparams_grid} reports the hyperparameter search grids used for each forecasting model in the expanding walk-forward cross-validation procedure.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{3.5cm} >{\raggedright\arraybackslash}p{10.2cm}}
+\caption{Hyperparameter grids for all machine learning models}
+\label{tab:hyperparams_grid} \\
+\toprule
+\textbf{Model} & \textbf{Hyperparameter grid} \\
+\midrule
+\endfirsthead
+
+\toprule
+\textbf{Model} & \textbf{Hyperparameter grid} \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{2}{r}{\textit{Continued on next page}} \\
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+OLS &
+No hyperparameters \\[0.4em]
+
+Lasso &
+$\alpha \in \{0.01,\,0.1,\,1.0,\,10.0\}$ \\[0.4em]
+
+Ridge &
+$\alpha \in \{0.01,\,0.1,\,1.0,\,10.0\}$ \\[0.4em]
+
+Elastic Net &
+$\alpha \in \{0.01,\,0.1,\,1.0,\,10.0\}$; \\
+& $l1\_ratio \in \{0.1,\,0.5,\,0.9\}$ \\[0.4em]
+
+Random Forest &
+$n\_estimators \in \{100,\,300\}$; \\
+& $max\_depth \in \{\text{None},\,5,\,10,\,20,\,30\}$; \\
+& $min\_samples\_leaf = 5$ \\[0.4em]
+
+Gradient Boosting &
+$n\_estimators \in \{100,\,300\}$; \\
+& $learning\_rate \in \{0.01,\,0.1\}$; \\
+& $max\_depth \in \{\text{None},\,3,\,5\}$ \\[0.4em]
+
+Support Vector Regression (SVR) &
+$C \in \{0.1,\,1.0,\,10.0\}$; \\
+& $\epsilon \in \{0.01,\,0.1\}$; \\
+& $kernel = \text{rbf}$ \\[0.4em]
+
+Neural Network (MLP) &
+$hidden\_layer\_sizes \in \{(16),\,(32),\,(32,16)\}$; \\
+& $\alpha \in \{10^{-4},\,10^{-3}\}$; \\
+& $learning\_rate\_init = 0.001$ \\[0.4em]
+
+LightGBM &
+$n\_estimators \in \{200,\,500\}$; \\
+& $learning\_rate \in \{0.01,\,0.1\}$; \\
+& $num\_leaves \in \{15,\,30\}$; \\
+& $max\_depth \in \{-1,\,10\}$ \\[0.4em]
+
+XGBoost &
+$n\_estimators \in \{200,\,500\}$; \\
+& $learning\_rate \in \{0.01,\,0.1\}$; \\
+& $max\_depth \in \{3,\,6\}$; \\
+& $subsample \in \{0.8,\,1.0\}$; \\
+& $colsample\_bytree \in \{0.8,\,1.0\}$ \\
+
+\end{longtable}
+
+
+\end{document}
